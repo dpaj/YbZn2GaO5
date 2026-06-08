@@ -1,0 +1,25 @@
+# Julia
+.julia/
+Manifest.toml.bak
+
+# VSCode/local
+.vscode/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Results that can be regenerated
+results/figures/*
+results/fits/*
+results/feature_tables/*
+
+# But keep folder placeholders
+!results/figures/.gitkeep
+!results/fits/.gitkeep
+!results/feature_tables/.gitkeep
+
+# Large/generated data, decide later whether Git LFS handles these
+data/raw/
+data/generated/
