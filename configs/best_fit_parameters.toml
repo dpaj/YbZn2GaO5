@@ -1,0 +1,17 @@
+[physical]
+gzz = 3.784584444
+J1_meV = 0.2299824987
+J2_meV = 0.008722296371
+sigma_gzz = 0.3859237343
+sigma_J = 0.2396873058
+gzz2 = 2.998557026
+sigma_gzz2 = 0.8439361137
+gperp_ratio = 2.967716763
+chi_vv_muB_per_T = 0.07826757513
+
+[neutron_extrinsic]
+second_kernel_relative_intensity = 0.1579822309
+neutron_global_scale = 0.04480834274
+
+[notes]
+description = "Latest co-fit best parameters used as initial guesses for refactored YbZn2GaO5 co-fit."
