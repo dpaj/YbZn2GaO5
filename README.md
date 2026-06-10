@@ -12,3 +12,10 @@ The current fitting workflow uses a fast analytical polarized-phase model for th
 - `scripts/` — runnable analysis and plotting scripts.
 - `results/` — generated fit outputs, figures, and feature tables.
 - `docs/` — notes on modeling choices, background subtraction, resolution, and reproducibility.
+
+## Quick start
+
+From the repository root:
+
+```powershell
+julia --project=. scripts/check_repo.jl
