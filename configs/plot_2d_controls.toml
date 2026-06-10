@@ -1,0 +1,18 @@
+# configs/plot_2d_controls.toml
+#
+# Extrinsic controls for the 2D data-versus-model comparison plot.
+#
+# The current legacy plotting script reads some of these through environment
+# variables, so the repo-native driver sets those variables before including
+# the legacy script.
+
+[data]
+neutron_2d_subdir = "data/neutron/CNCS_2d_scans"
+
+[output]
+figure_subdir = "results/figures/2d_data_vs_model"
+
+[makie]
+# Use "CairoMakie" for non-interactive saved figures.
+# Use "GLMakie" if you want an interactive display window.
+backend = "CairoMakie"

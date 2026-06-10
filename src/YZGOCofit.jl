@@ -8,5 +8,6 @@ export load_cofit_controls
 export toml_symbol
 export cofit_initial_guess_kwargs
 export print_initial_guess_kwargs
+export load_plot_2d_controls
 
 end

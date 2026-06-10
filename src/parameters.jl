@@ -14,6 +14,15 @@ function load_toml_config(path::AbstractString)
 end
 
 """
+    load_plot_2d_controls(path)
+
+Load the 2D plotting controls.
+"""
+function load_plot_2d_controls(path::AbstractString)
+    return load_toml_config(path)
+end
+
+"""
     load_best_fit_parameters(path)
 
 Load the best-fit parameter TOML file used for YbZn2GaO5 neutron/magnetization modeling.
