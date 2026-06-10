@@ -19,3 +19,8 @@ From the repository root:
 
 ```powershell
 julia --project=. scripts/check_repo.jl
+
+To compare the Ei = 3.32 meV and Ei = 4.65 meV 1D scans and background handling:
+
+```powershell
+julia --project=. scripts/compare_1d_4p65_3p32_backgrounds.jl
