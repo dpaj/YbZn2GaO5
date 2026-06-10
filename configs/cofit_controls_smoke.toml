@@ -1,0 +1,31 @@
+# configs/cofit_controls_smoke.toml
+#
+# Cheap no-optimization control file for testing that the repo wiring works.
+
+[data]
+fields_T = [9.0, 14.0]
+neutron_fit_Ei_meV = 4.65
+neutron_fit_temperature_K = 0.07
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+data_mode = "tail_bgsub"
+
+[weights]
+neutron_weight = 1.0
+magnetization_weight = 10.0
+
+[optimization]
+run_optimization = false
+maxiters = 1
+
+[sampling]
+n_samples_per_cut = 5000
+final_n_samples_per_cut = 10000
+n_samples_magnetization = 2000
+final_n_samples_magnetization = 5000
+
+[plotting]
+make_plots = false
+display_figures = false
+
+[output]
+fit_name = "cofit_9T14T_smoke"

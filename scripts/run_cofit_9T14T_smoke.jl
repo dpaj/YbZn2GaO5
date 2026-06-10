@@ -12,7 +12,11 @@
 #
 #     julia --project=. scripts/run_cofit_9T14T_smoke.jl
 
+
 const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
+
+include(joinpath(REPO_ROOT, "src", "YZGOCofit.jl"))
+using .YZGOCofit
 
 include(joinpath(
     REPO_ROOT,
@@ -20,6 +24,9 @@ include(joinpath(
     "legacy",
     "YZGO_cofit_9T14T_shared_fraction_legacy.jl",
 ))
+
+const CONTROLS_PATH = joinpath(REPO_ROOT, "configs", "cofit_controls_smoke.toml")
+const controls = load_cofit_controls(CONTROLS_PATH)
 
 const NEUTRON_1D_DIR = joinpath(REPO_ROOT, "data", "neutron", "CNCS_1d_scans")
 
@@ -34,7 +41,7 @@ const OUTFIT_DIR = joinpath(
     REPO_ROOT,
     "results",
     "fits",
-    "cofit_9T14T_smoke",
+    controls["output"]["fit_name"],
 )
 
 result = run_yzgo_neutron_magnetization_cofit_shared_fraction(
@@ -42,23 +49,23 @@ result = run_yzgo_neutron_magnetization_cofit_shared_fraction(
     magnetization_csv = MAGNETIZATION_CSV,
     outdir = OUTFIT_DIR,
 
-    # Smoke-test mode.
-    run_optimization = false,
-    make_plots = false,
-    display_figures = false,
+    run_optimization = controls["optimization"]["run_optimization"],
+    make_plots = controls["plotting"]["make_plots"],
+    display_figures = controls["plotting"]["display_figures"],
 
-    # Keep this cheap for the first repo integration test.
-    n_samples_per_cut = 5_000,
-    final_n_samples_per_cut = 10_000,
-    n_samples_magnetization = 2_000,
-    final_n_samples_magnetization = 5_000,
+    n_samples_per_cut = controls["sampling"]["n_samples_per_cut"],
+    final_n_samples_per_cut = controls["sampling"]["final_n_samples_per_cut"],
+    n_samples_magnetization = controls["sampling"]["n_samples_magnetization"],
+    final_n_samples_magnetization = controls["sampling"]["final_n_samples_magnetization"],
 
-    # Same scientific data selection as the co-fit.
-    fields_T = [9.0, 14.0],
-    neutron_fit_Ei_meV = 4.65,
-    neutron_fit_temperature_K = 0.07,
-    qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"],
-    data_mode = :tail_bgsub,
+    fields_T = controls["data"]["fields_T"],
+    neutron_fit_Ei_meV = controls["data"]["neutron_fit_Ei_meV"],
+    neutron_fit_temperature_K = controls["data"]["neutron_fit_temperature_K"],
+    qtags = controls["data"]["qtags"],
+    data_mode = toml_symbol(controls["data"]["data_mode"]),
+
+    neutron_weight = controls["weights"]["neutron_weight"],
+    magnetization_weight = controls["weights"]["magnetization_weight"],
 )
 
 println()
