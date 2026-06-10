@@ -28,9 +28,14 @@ using .YZGOCofit
 const BEST_FIT_PATH = joinpath(REPO_ROOT, "configs", "best_fit_parameters.toml")
 const COFIT_SMOKE_CONTROLS_PATH = joinpath(REPO_ROOT, "configs", "cofit_controls_smoke.toml")
 const PLOT_2D_CONTROLS_PATH = joinpath(REPO_ROOT, "configs", "plot_2d_controls.toml")
+const BACKGROUND_COMPARE_CONTROLS_PATH = joinpath(
+    REPO_ROOT,
+    "configs",
+    "background_compare_controls.toml",
+)
 
 println("Checking config files...")
-for path in (BEST_FIT_PATH, COFIT_SMOKE_CONTROLS_PATH, PLOT_2D_CONTROLS_PATH)
+for path in (BEST_FIT_PATH, COFIT_SMOKE_CONTROLS_PATH, PLOT_2D_CONTROLS_PATH, BACKGROUND_COMPARE_CONTROLS_PATH)
     if !isfile(path)
         error("Missing required config file: $path")
     end
@@ -95,3 +100,4 @@ println()
 println("Next optional checks:")
 println("  julia --project=. scripts/run_cofit_9T14T_smoke.jl")
 println("  julia --project=. scripts/plot_2d_data_vs_model.jl")
+println("  julia --project=. scripts/compare_1d_4p65_3p32_backgrounds.jl")
