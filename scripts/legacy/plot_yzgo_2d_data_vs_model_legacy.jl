@@ -5963,44 +5963,206 @@ const X_LIMS_2D = nothing       # e.g. (-1/3, 1.0)
 # It is not an absolute physical g_perp.  Because the model also has an overall
 # neutron intensity scale, the absolute dispersive transverse prefactor is a
 # gauge convention and only the flat/dispersive ratio is identifiable.
-const LAST_COFIT_BEST_PARAMS_2D = (;
-    gzz = 3.784584444,
-    J1_meV = 0.2299824987,
-    J2_meV = 0.008722296371,
-    sigma_gzz = 0.3859237343,
-    sigma_J = 0.2396873058,
-    gzz2 = 2.998557026,
-    sigma_gzz2 = 0.8439361137,
-    gperp_ratio = 2.967716763,
-    chi_vv_muB_per_T = 0.07826757513,
-    log10_second_kernel_relative_intensity = -0.8013917578,
-    r2_shared = 0.1579822309,
-    log10_neutron_scale = -1.348641118,
-    neutron_global_scale = 0.04480834274,
+
+# ---------------------------------------------------------------------------
+# Latest co-fit parameters for 2D model comparison
+# ---------------------------------------------------------------------------
+#
+# Repo refactor note:
+#
+# Older versions of this script carried a hard-coded NamedTuple of the latest
+# co-fit parameters. The repo version instead reads:
+#
+#   configs/best_fit_parameters.toml
+#
+# via ENV["YZGO_BEST_FIT_PARAMETERS_TOML"], which is set by
+# scripts/plot_2d_data_vs_model.jl before this file is included.
+#
+# This makes the 1D co-fit and the 2D visualization use the same parameter
+# source.
+
+using TOML
+
+function _toml_lookup_2d(config::Dict, sections::Vector{String}, key::String)
+    for section in sections
+        if haskey(config, section)
+            table = config[section]
+            if table isa Dict && haskey(table, key)
+                return table[key]
+            end
+        end
+    end
+
+    tried = join(["[$s].$key" for s in sections], ", ")
+    error("Missing required TOML value for 2D model parameters. Tried: $tried")
+end
+
+function _toml_positive_or_log10_2d(
+    config::Dict;
+    sections::Vector{String},
+    value_key::String,
+    log10_key::String,
+)
+    for section in sections
+        if !haskey(config, section)
+            continue
+        end
+
+        table = config[section]
+        if !(table isa Dict)
+            continue
+        end
+
+        if haskey(table, value_key)
+            return Float64(table[value_key])
+        end
+
+        if haskey(table, log10_key)
+            return 10.0 ^ Float64(table[log10_key])
+        end
+    end
+
+    tried_value = join(["[$s].$value_key" for s in sections], ", ")
+    tried_log10 = join(["[$s].$log10_key" for s in sections], ", ")
+    error("Missing required TOML value for 2D model parameters. Tried: $tried_value or $tried_log10")
+end
+
+function load_2d_model_parameters_from_best_fit_toml(path::AbstractString)
+    if !isfile(path)
+        error("Could not find best-fit parameter TOML for 2D model: $path")
+    end
+
+    config = TOML.parsefile(path)
+
+    physical_sections = ["physical", "initial_guess", "parameters"]
+
+    extrinsic_sections = [
+        "neutron_extrinsic",
+        "extrinsic",
+        "physical",
+        "initial_guess",
+        "parameters",
+    ]
+
+    sigma_J = Float64(_toml_lookup_2d(config, physical_sections, "sigma_J"))
+
+    r2_shared = _toml_positive_or_log10_2d(
+        config;
+        sections = extrinsic_sections,
+        value_key = "second_kernel_relative_intensity",
+        log10_key = "log10_second_kernel_relative_intensity",
+    )
+
+    neutron_global_scale = _toml_positive_or_log10_2d(
+        config;
+        sections = extrinsic_sections,
+        value_key = "neutron_global_scale",
+        log10_key = "log10_neutron_scale",
+    )
+
+    gperp_ratio = Float64(_toml_lookup_2d(config, physical_sections, "gperp_ratio"))
+
+    return (;
+        gzz = Float64(_toml_lookup_2d(config, physical_sections, "gzz")),
+        J1_meV = Float64(_toml_lookup_2d(config, physical_sections, "J1_meV")),
+        J2_meV = Float64(_toml_lookup_2d(config, physical_sections, "J2_meV")),
+
+        # Latest model convention: one shared fractional exchange-disorder width.
+        sigma_gzz = Float64(_toml_lookup_2d(config, physical_sections, "sigma_gzz")),
+        sigma_J = sigma_J,
+
+        gzz2 = Float64(_toml_lookup_2d(config, physical_sections, "gzz2")),
+        sigma_gzz2 = Float64(_toml_lookup_2d(config, physical_sections, "sigma_gzz2")),
+
+        # Latest model convention: one effective neutron transverse-intensity ratio.
+        # This is the relative matrix-element/intensity amplitude of the flat
+        # component compared with the dispersive component, not a physical g⊥.
+        gperp_ratio = gperp_ratio,
+
+        chi_vv_muB_per_T = Float64(_toml_lookup_2d(config, physical_sections, "chi_vv_muB_per_T")),
+
+        # Positive extrinsic neutron intensity parameters.
+        second_kernel_relative_intensity = r2_shared,
+        neutron_global_scale = neutron_global_scale,
+    )
+end
+
+const BEST_FIT_PARAMETERS_TOML_FOR_2D = get(
+    ENV,
+    "YZGO_BEST_FIT_PARAMETERS_TOML",
+    "",
 )
 
-# Internal gauge used only to satisfy older helper routines that still expect
-# :gperp and :gperp2 keys.  This is not a fitted or physical Yb g factor.
-const NEUTRON_TRANSVERSE_MATRIX_ELEMENT_GAUGE_2D = 1.0
+if isempty(BEST_FIT_PARAMETERS_TOML_FOR_2D)
+    error(
+        "ENV[\"YZGO_BEST_FIT_PARAMETERS_TOML\"] is not set. " *
+        "Run this through scripts/plot_2d_data_vs_model.jl."
+    )
+end
 
+const LAST_COFIT_BEST_PARAMS_2D = load_2d_model_parameters_from_best_fit_toml(
+    BEST_FIT_PARAMETERS_TOML_FOR_2D,
+)
+
+# Canonical parameter dictionary used by the 2D plotting layer.
+#
+# User-facing/science-facing keys should stay in the latest model language:
+#
+#   sigma_J       one shared fractional exchange-disorder width
+#   gperp_ratio   relative transverse neutron matrix-element amplitude
+#
+# Older helper functions in the remaining legacy analytical engine still expect
+# :sigma_J1/:sigma_J2 and :gperp/:gperp2.  Do not expose those as model
+# parameters; use `_nf_legacy_fit_dict_for_2d` only at the boundary where we
+# call those helper functions.
 const PRELIM_BEST_PARAMS = Dict{Symbol,Float64}(
     :gzz => LAST_COFIT_BEST_PARAMS_2D.gzz,
     :J1_meV => LAST_COFIT_BEST_PARAMS_2D.J1_meV,
     :J2_meV => LAST_COFIT_BEST_PARAMS_2D.J2_meV,
     :sigma_gzz => LAST_COFIT_BEST_PARAMS_2D.sigma_gzz,
-    :sigma_J1 => LAST_COFIT_BEST_PARAMS_2D.sigma_J,
-    :sigma_J2 => LAST_COFIT_BEST_PARAMS_2D.sigma_J,
+    :sigma_J => LAST_COFIT_BEST_PARAMS_2D.sigma_J,
     :gzz2 => LAST_COFIT_BEST_PARAMS_2D.gzz2,
     :sigma_gzz2 => LAST_COFIT_BEST_PARAMS_2D.sigma_gzz2,
-    :gperp => NEUTRON_TRANSVERSE_MATRIX_ELEMENT_GAUGE_2D,  # legacy helper gauge only; not physical/fitted
-    :gperp2 => NEUTRON_TRANSVERSE_MATRIX_ELEMENT_GAUGE_2D * LAST_COFIT_BEST_PARAMS_2D.gperp_ratio,
     :gperp_ratio => LAST_COFIT_BEST_PARAMS_2D.gperp_ratio,
     :chi_vv_muB_per_T => LAST_COFIT_BEST_PARAMS_2D.chi_vv_muB_per_T,
-    :log10_second_kernel_relative_intensity => LAST_COFIT_BEST_PARAMS_2D.log10_second_kernel_relative_intensity,
-    :r2_shared => LAST_COFIT_BEST_PARAMS_2D.r2_shared,
-    :log10_neutron_scale => LAST_COFIT_BEST_PARAMS_2D.log10_neutron_scale,
+    :second_kernel_relative_intensity => LAST_COFIT_BEST_PARAMS_2D.second_kernel_relative_intensity,
     :neutron_global_scale => LAST_COFIT_BEST_PARAMS_2D.neutron_global_scale,
 )
+
+function _nf_legacy_fit_dict_for_2d(p::Dict{Symbol,Float64})
+    # Boundary adapter only. This is not a second parameterization.
+    #
+    # The analytical helper functions in NF still use older dictionary keys.
+    # The current model has one sigma_J and one gperp_ratio, so this adapter
+    # maps:
+    #
+    #   sigma_J -> sigma_J1 = sigma_J2
+    #   gperp_ratio -> gperp = 1, gperp2 = gperp_ratio
+    #
+    return Dict{Symbol,Float64}(
+        :gzz => p[:gzz],
+        :J1_meV => p[:J1_meV],
+        :J2_meV => p[:J2_meV],
+        :sigma_gzz => p[:sigma_gzz],
+        :sigma_J1 => p[:sigma_J],
+        :sigma_J2 => p[:sigma_J],
+        :gzz2 => p[:gzz2],
+        :sigma_gzz2 => p[:sigma_gzz2],
+        :gperp => 1.0,
+        :gperp2 => p[:gperp_ratio],
+        :log10_second_kernel_relative_intensity => log10(p[:second_kernel_relative_intensity]),
+        :log10_scale => log10(p[:neutron_global_scale]),
+        :neutron_global_scale => p[:neutron_global_scale],
+        :chi_vv_muB_per_T => p[:chi_vv_muB_per_T],
+    )
+end
+
+function _neutron_intensity_scales_from_canonical_2d(p::Dict{Symbol,Float64})
+    return (;
+        dispersive = 1.0,
+        nondispersive = max(p[:gperp_ratio], 0.0)^2,
+    )
+end
 
 # -----------------------------
 # 2D data structure/helpers
@@ -6325,12 +6487,15 @@ end
 # -----------------------------
 
 function _model_params_for_field_2d(p::Dict{Symbol,Float64}, field_T::Real)
-    disp = NF._dispersive_model_params_from_fit_dict(p, field_T; S=0.5)
-    flat = NF._nondispersive_model_params_from_fit_dict(p, field_T; S=0.5)
-    ddisp = NF._dispersive_disorder_params_from_fit_dict(p; J_units=:fractional, correlate_J1_J2=false)
-    dflat = NF._nondispersive_disorder_params_from_fit_dict(p)
-    gscales = NF.neutron_gperp_intensity_scales(p)
-    return (; disp, flat, ddisp, dflat, gscales, r2=NF.second_kernel_relative_intensity(p))
+    p_nf = _nf_legacy_fit_dict_for_2d(p)
+
+    disp = NF._dispersive_model_params_from_fit_dict(p_nf, field_T; S=0.5)
+    flat = NF._nondispersive_model_params_from_fit_dict(p_nf, field_T; S=0.5)
+    ddisp = NF._dispersive_disorder_params_from_fit_dict(p_nf; J_units=:fractional, correlate_J1_J2=false)
+    dflat = NF._nondispersive_disorder_params_from_fit_dict(p_nf)
+    gscales = _neutron_intensity_scales_from_canonical_2d(p)
+
+    return (; disp, flat, ddisp, dflat, gscales, r2=p[:second_kernel_relative_intensity])
 end
 
 function _simulate_prelim_model_2d(scan::Scan2DCompare, field_T::Real, leg::Integer;
@@ -6561,16 +6726,14 @@ end
 function print_prelim_parameter_summary_2d()
     println("Fixed latest co-fit parameters used for 2D comparison")
     println("----------------------------------------------------------")
-    for nm in [:gzz, :J1_meV, :J2_meV, :sigma_gzz, :sigma_J1, :sigma_J2,
-               :gzz2, :sigma_gzz2, :gperp, :gperp2, :chi_vv_muB_per_T,
-               :log10_second_kernel_relative_intensity, :r2_shared]
+    for nm in [:gzz, :J1_meV, :J2_meV, :sigma_gzz, :sigma_J,
+               :gzz2, :sigma_gzz2, :gperp_ratio, :chi_vv_muB_per_T,
+               :second_kernel_relative_intensity, :neutron_global_scale]
         println(@sprintf("%-42s %.10g", String(nm), PRELIM_BEST_PARAMS[nm]))
     end
-    println(@sprintf("%-42s %.10g", "r2_from_log10", NF.second_kernel_relative_intensity(PRELIM_BEST_PARAMS)))
-    gsc = NF.neutron_gperp_intensity_scales(PRELIM_BEST_PARAMS)
-    println(@sprintf("%-42s %.10g", "gperp_disp^2", gsc.dispersive))
-    println(@sprintf("%-42s %.10g", "gperp_flat^2", gsc.nondispersive))
-    println(@sprintf("%-42s %.10g", "neutron_global_scale", PRELIM_BEST_PARAMS[:neutron_global_scale]))
+    gsc = _neutron_intensity_scales_from_canonical_2d(PRELIM_BEST_PARAMS)
+    println(@sprintf("%-42s %.10g", "dispersive_transverse_intensity_factor", gsc.dispersive))
+    println(@sprintf("%-42s %.10g", "flat_transverse_intensity_factor", gsc.nondispersive))
     println(@sprintf("%-42s %.10g", "manual_model_scale", MANUAL_MODEL_SCALE))
 end
 

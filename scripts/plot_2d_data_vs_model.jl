@@ -2,11 +2,14 @@
 #
 # Repo-native driver for the YbZn2GaO5 2D data-versus-model plot.
 #
+# This driver reads:
+#
+#   configs/plot_2d_controls.toml     2D plotting paths/backend controls
+#   configs/best_fit_parameters.toml  final/latest co-fit parameters
+#
 # The plotting/model implementation still lives in:
 #
 #   scripts/legacy/plot_yzgo_2d_data_vs_model_legacy.jl
-#
-# This driver provides clean repo-relative paths and plotting controls.
 #
 # Run from the repo root with:
 #
@@ -29,7 +32,7 @@ using .YZGOCofit
 
 
 # ---------------------------------------------------------------------------
-# Load 2D plotting controls
+# Load configs
 # ---------------------------------------------------------------------------
 
 const PLOT_2D_CONTROLS_PATH = joinpath(
@@ -38,7 +41,14 @@ const PLOT_2D_CONTROLS_PATH = joinpath(
     "plot_2d_controls.toml",
 )
 
+const BEST_FIT_PATH = joinpath(
+    REPO_ROOT,
+    "configs",
+    "best_fit_parameters.toml",
+)
+
 const plot_controls = load_toml_config(PLOT_2D_CONTROLS_PATH)
+const best_fit_parameters = load_best_fit_parameters(BEST_FIT_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -64,13 +74,16 @@ mkpath(OUTFIG_DIR)
 #
 # Important:
 #
-# The legacy script defines constants such as YZGO_2D_DATA_DIR using ENV at
-# include time. Therefore these ENV values must be set BEFORE including the
-# legacy script.
+# The legacy script defines constants using ENV at include time. Therefore
+# these ENV values must be set BEFORE including the legacy script.
 
 ENV["YZGO_DATA_DIR"] = NEUTRON_2D_DIR
 ENV["YZGO_OUT_DIR"] = OUTFIG_DIR
 ENV["MAKIE_BACKEND"] = plot_controls["makie"]["backend"]
+
+# New bridge: make the 2D legacy script read the same best-fit parameter file
+# as the co-fit drivers.
+ENV["YZGO_BEST_FIT_PARAMETERS_TOML"] = BEST_FIT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +92,10 @@ ENV["MAKIE_BACKEND"] = plot_controls["makie"]["backend"]
 
 println("2D plot controls config:")
 println(PLOT_2D_CONTROLS_PATH)
+println()
+
+println("Best-fit parameter config:")
+println(BEST_FIT_PATH)
 println()
 
 println("2D neutron data directory:")
@@ -97,9 +114,6 @@ println()
 # ---------------------------------------------------------------------------
 # Load legacy 2D plotting implementation
 # ---------------------------------------------------------------------------
-#
-# This include must happen after setting ENV["YZGO_DATA_DIR"],
-# ENV["YZGO_OUT_DIR"], and ENV["MAKIE_BACKEND"].
 
 include(joinpath(
     REPO_ROOT,
@@ -124,6 +138,9 @@ println()
 println("2D data-versus-model plot completed.")
 println("Controls loaded from:")
 println(PLOT_2D_CONTROLS_PATH)
+println()
+println("Initial/best-fit parameters loaded from:")
+println(BEST_FIT_PATH)
 println()
 println("Wrote figures to:")
 println(OUTFIG_DIR)
