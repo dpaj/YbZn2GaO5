@@ -1,0 +1,26 @@
+# configs/background_compare_controls.toml
+#
+# Controls for the 1D comparison between Ei = 4.65 meV and Ei = 3.32 meV
+# background-subtracted scans.
+#
+# Purpose:
+#   Demonstrate that the background handling gives a representative sample
+#   signal in the 3.32 meV data, even though that incident energy lacks the
+#   gamma-point scan available in the 4.65 meV set.
+
+[data]
+neutron_1d_subdir = "data/neutron/CNCS_1d_scans"
+
+[output]
+figure_subdir = "results/figures/1d_4p65_3p32_background_compare"
+
+[makie]
+# The legacy comparison script currently uses GLMakie directly.
+backend = "GLMakie"
+
+[plotting]
+save_png = true
+show_errorbars = true
+make_diagnostic_plot = true
+display_figures = false
+bgsub_ylim = [-0.0005, 0.0030]
