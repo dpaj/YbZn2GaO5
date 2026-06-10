@@ -18,7 +18,7 @@ neutron_weight = 1.0
 magnetization_weight = 10.0
 
 [optimization]
-run_optimization = true
+run_optimization = false
 maxiters = 1000
 
 [sampling]

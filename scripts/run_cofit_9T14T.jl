@@ -2,18 +2,14 @@
 #
 # Main YbZn2GaO5 neutron + magnetization co-fit driver.
 #
-# This is the full, non-smoke version of the driver script. It reads
-# extrinsic run controls from:
+# This full driver reads:
 #
-#     configs/cofit_controls.toml
-#
-# The older fitting/model logic is still in:
-#
-#     scripts/legacy/YZGO_cofit_9T14T_shared_fraction_legacy.jl
+#   configs/cofit_controls.toml       extrinsic run controls
+#   configs/best_fit_parameters.toml  initial guesses / latest best fit
 #
 # Run from the repo root with:
 #
-#     julia --project=. scripts/run_cofit_9T14T.jl
+#   julia --project=. scripts/run_cofit_9T14T.jl
 
 
 # ---------------------------------------------------------------------------
@@ -24,15 +20,8 @@ const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
 
 
 # ---------------------------------------------------------------------------
-# Load small repo utility module
+# Load repo utility module
 # ---------------------------------------------------------------------------
-#
-# This provides:
-#   load_cofit_controls(...)
-#   toml_symbol(...)
-#
-# Later, this module will also provide shared model, fitting, plotting,
-# and Sunny-validation utilities.
 
 include(joinpath(REPO_ROOT, "src", "YZGOCofit.jl"))
 using .YZGOCofit
@@ -41,9 +30,6 @@ using .YZGOCofit
 # ---------------------------------------------------------------------------
 # Load legacy co-fit implementation
 # ---------------------------------------------------------------------------
-#
-# For now, the real fitting/model code still lives in the legacy script.
-# This driver is repo-native: it handles paths and external controls.
 
 include(joinpath(
     REPO_ROOT,
@@ -54,11 +40,20 @@ include(joinpath(
 
 
 # ---------------------------------------------------------------------------
-# Load run controls
+# Load configs
 # ---------------------------------------------------------------------------
 
 const CONTROLS_PATH = joinpath(REPO_ROOT, "configs", "cofit_controls.toml")
+const BEST_FIT_PATH = joinpath(REPO_ROOT, "configs", "best_fit_parameters.toml")
+
 const controls = load_cofit_controls(CONTROLS_PATH)
+const best_fit_parameters = load_best_fit_parameters(BEST_FIT_PATH)
+const initial_guess_kwargs = cofit_initial_guess_kwargs(best_fit_parameters)
+
+# Convert the TOML initial guesses into the legacy co-fit parameter specs.
+# This is the key bridge between the new repo config layer and the old fitting
+# implementation.
+const specs = cofit_default_param_specs(; initial_guess_kwargs...)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +83,21 @@ const OUTFIT_DIR = joinpath(
 
 
 # ---------------------------------------------------------------------------
+# Console summary
+# ---------------------------------------------------------------------------
+
+println("Co-fit controls config:")
+println(CONTROLS_PATH)
+println()
+
+println("Best-fit parameter config:")
+println(BEST_FIT_PATH)
+println()
+
+print_initial_guess_kwargs(initial_guess_kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Run the full co-fit
 # ---------------------------------------------------------------------------
 
@@ -95,6 +105,9 @@ result = run_yzgo_neutron_magnetization_cofit_shared_fraction(
     base_dir = NEUTRON_1D_DIR,
     magnetization_csv = MAGNETIZATION_CSV,
     outdir = OUTFIT_DIR,
+
+    # Initial guesses / fit parameter specs
+    specs = specs,
 
     # Optimization controls
     run_optimization = controls["optimization"]["run_optimization"],
@@ -124,13 +137,16 @@ result = run_yzgo_neutron_magnetization_cofit_shared_fraction(
 
 
 # ---------------------------------------------------------------------------
-# Console summary
+# Console completion message
 # ---------------------------------------------------------------------------
 
 println()
 println("Co-fit completed.")
 println("Controls loaded from:")
 println(CONTROLS_PATH)
+println()
+println("Initial guesses loaded from:")
+println(BEST_FIT_PATH)
 println()
 println("Wrote results to:")
 println(OUTFIT_DIR)
