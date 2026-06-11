@@ -3,8 +3,9 @@
 # Preliminary Sunny.jl validation bridge for the YbZn2GaO5 magnetization model.
 #
 # This script is intentionally the first Sunny-validation target because it
-# checks canonical parameter loading and the two-component magnetization logic
-# before the more expensive large-cell/KPM calculations.
+# checks canonical parameter loading, the two-component magnetization logic,
+# and the analytical co-fit magnetization scale convention before the more
+# expensive large-cell/KPM calculations.
 #
 # Run from the repo root with:
 #

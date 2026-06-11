@@ -43,3 +43,49 @@ The flat component is represented as an independent-spin / zero-exchange Sunny c
 ## Status
 
 These scripts are preliminary scaffolds.  The mean-field bridge is expected to run first.  The large-cell and KPM scripts may require Sunny API tuning depending on the installed Sunny version and the final choice of effective triangular-lattice builder.
+
+## Magnetization normalization and scale convention
+
+The Sunny magnetization validation now follows the analytical co-fit comparison
+convention explicitly.
+
+The two magnetic components are first combined using the shared second-kernel
+relative weight
+
+```text
+Mmag = (Mdisp + r2*Mflat)/(1+r2)
+```
+
+when `normalize_second_kernel_weight = true`.
+
+The Van Vleck-like term is then added to form the unscaled comparison curve:
+
+```text
+Mcombo_unscaled = Mmag + chi_vv * B
+```
+
+Finally, the analytical co-fit magnetization scale from
+
+```text
+configs/best_fit_parameters.toml
+
+[magnetization_extrinsic]
+magnetization_global_scale = ...
+```
+
+is applied to the full unscaled curve:
+
+```text
+Mtotal = magnetization_global_scale * Mcombo_unscaled
+```
+
+This matches the analytical co-fit CSV convention, where `M_disp_scaled`,
+`M_vv_scaled`, and `M_nondispersive_scaled` are all scaled by the same
+`magnetization_scale`.
+
+The Sunny output CSVs retain raw, unscaled, and scaled component columns so that
+spin-vs-moment sign/scale conventions remain diagnosable.
+
+The large-cell `minimize_energy!` workflow also has an explicit `moment_sign`
+option under `[largecell]` because Sunny spin and magnetic-moment sign
+conventions can differ from the experimental plotting convention.

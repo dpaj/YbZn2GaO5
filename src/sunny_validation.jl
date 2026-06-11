@@ -126,6 +126,156 @@ function sv_best_vertical_scale(model::AbstractVector, data::AbstractVector)
     return sum(model[mask] .* data[mask]) / den
 end
 
+
+# -----------------------------------------------------------------------------
+# Magnetization scale and two-component mixture convention
+# -----------------------------------------------------------------------------
+
+function sv_magnetization_global_scale(params, controls::Dict)
+    mag = controls["magnetization"]
+    if get(mag, "use_magnetization_global_scale_from_best_fit", true)
+        if hasproperty(params, :magnetization_global_scale)
+            return Float64(params.magnetization_global_scale)
+        else
+            error(
+                "best_fit_parameters.toml does not define magnetization_global_scale. " *
+                "Add [magnetization_extrinsic] magnetization_global_scale = <value>."
+            )
+        end
+    else
+        return Float64(get(mag, "manual_magnetization_global_scale", 1.0))
+    end
+end
+
+function sv_magnetization_mixture(Mdisp::AbstractVector, Mflat::AbstractVector, r2::Real, controls::Dict)
+    normalize_weight = get(controls["magnetization"], "normalize_second_kernel_weight", true)
+    if normalize_weight
+        denom = 1.0 + Float64(r2)
+        return (Mdisp ./ denom, (Float64(r2) .* Mflat) ./ denom)
+    else
+        return (copy(Mdisp), Float64(r2) .* Mflat)
+    end
+end
+
+function sv_build_magnetization_comparison(Bs, Mdisp_raw, Mflat_raw, params, controls::Dict; moment_sign::Real=1.0)
+    sign_factor = Float64(moment_sign)
+
+    # Convert calculator convention to the experimental positive-M convention.
+    Mdisp_site = sign_factor .* Mdisp_raw
+    Mflat_site = sign_factor .* Mflat_raw
+
+    # Mixture convention mirrors the analytical co-fit comparison layer.
+    r2 = sv_second_kernel_weight(params, controls)
+    Mdisp_contrib_unscaled, Mflat_contrib_unscaled =
+        sv_magnetization_mixture(Mdisp_site, Mflat_site, r2, controls)
+
+    Mmag_unscaled = Mdisp_contrib_unscaled .+ Mflat_contrib_unscaled
+
+    include_chi_vv = get(controls["magnetization"], "include_chi_vv", true)
+    Mvv_unscaled = include_chi_vv ?
+        params.chi_vv_muB_per_T .* Bs :
+        zeros(Float64, length(Bs))
+
+    Mcombo_unscaled = Mmag_unscaled .+ Mvv_unscaled
+
+    # Analytical-model convention:
+    # magnetization_global_scale multiplies the whole unscaled magnetization
+    # comparison curve, including the Van Vleck term.
+    magnetization_scale = sv_magnetization_global_scale(params, controls)
+    Mtotal_scaled = magnetization_scale .* Mcombo_unscaled
+
+    return (;
+        r2 = r2,
+        magnetization_scale = magnetization_scale,
+        normalize_second_kernel_weight = get(controls["magnetization"], "normalize_second_kernel_weight", true),
+        include_chi_vv = include_chi_vv,
+        moment_sign = sign_factor,
+
+        M_disp_raw_uB_per_site = Mdisp_raw,
+        M_flat_raw_uB_per_site = Mflat_raw,
+        M_disp_signed_uB_per_site = Mdisp_site,
+        M_flat_signed_uB_per_site = Mflat_site,
+
+        M_disp_contrib_unscaled = Mdisp_contrib_unscaled,
+        M_flat_contrib_unscaled = Mflat_contrib_unscaled,
+        M_magnetic_unscaled = Mmag_unscaled,
+        M_vv_unscaled = Mvv_unscaled,
+        M_combo_unscaled = Mcombo_unscaled,
+
+        M_disp_scaled = magnetization_scale .* Mdisp_contrib_unscaled,
+        M_flat_scaled = magnetization_scale .* Mflat_contrib_unscaled,
+        M_magnetic_scaled = magnetization_scale .* Mmag_unscaled,
+        M_vv_scaled = magnetization_scale .* Mvv_unscaled,
+        M_total_scaled = Mtotal_scaled,
+    )
+end
+
+function sv_magnetization_scale_diagnostics(Bs, combo_unscaled, total_scaled, data)
+    data_on_grid = sv_interp1(data.B_T, data.M_muB_per_Yb, Bs)
+    return (;
+        diagnostic_scale_unscaled_combo = sv_best_vertical_scale(combo_unscaled, data_on_grid),
+        diagnostic_scale_primary_total = sv_best_vertical_scale(total_scaled, data_on_grid),
+        M_exp_interp_uB_per_Yb = data_on_grid,
+    )
+end
+
+function sv_write_magnetization_csv(path::AbstractString, Bs, comp, diag)
+    mkpath(dirname(path))
+    open(path, "w") do io
+        println(io, join([
+            "B_T",
+            "M_total_uB_per_Yb",
+            "M_magnetic_scaled",
+            "M_disp_scaled",
+            "M_flat_scaled",
+            "M_vv_scaled",
+            "M_combo_unscaled",
+            "M_magnetic_unscaled",
+            "M_disp_contrib_unscaled",
+            "M_flat_contrib_unscaled",
+            "M_vv_unscaled",
+            "M_disp_raw_uB_per_site",
+            "M_flat_raw_uB_per_site",
+            "M_exp_interp_uB_per_Yb",
+            "second_kernel_weight",
+            "magnetization_global_scale",
+            "diagnostic_scale_unscaled_combo",
+            "diagnostic_scale_primary_total",
+            "normalize_second_kernel_weight",
+            "include_chi_vv",
+            "moment_sign",
+        ], ","))
+
+        for i in eachindex(Bs)
+            vals = [
+                Bs[i],
+                comp.M_total_scaled[i],
+                comp.M_magnetic_scaled[i],
+                comp.M_disp_scaled[i],
+                comp.M_flat_scaled[i],
+                comp.M_vv_scaled[i],
+                comp.M_combo_unscaled[i],
+                comp.M_magnetic_unscaled[i],
+                comp.M_disp_contrib_unscaled[i],
+                comp.M_flat_contrib_unscaled[i],
+                comp.M_vv_unscaled[i],
+                comp.M_disp_raw_uB_per_site[i],
+                comp.M_flat_raw_uB_per_site[i],
+                diag.M_exp_interp_uB_per_Yb[i],
+                comp.r2,
+                comp.magnetization_scale,
+                diag.diagnostic_scale_unscaled_combo,
+                diag.diagnostic_scale_primary_total,
+                comp.normalize_second_kernel_weight ? 1.0 : 0.0,
+                comp.include_chi_vv ? 1.0 : 0.0,
+                comp.moment_sign,
+            ]
+            println(io, join([@sprintf("%.10g", Float64(v)) for v in vals], ","))
+        end
+    end
+    return path
+end
+
 function sv_write_xy_csv(path::AbstractString, header::AbstractString, cols...)
     mkpath(dirname(path))
     n = length(cols[1])
@@ -261,43 +411,43 @@ function sv_run_meanfield_magnetization(repo_root::AbstractString; controls=sv_l
     qn = Int(controls["meanfield"]["normal_quad_n"])
     qzmax = Float64(controls["meanfield"]["normal_quad_zmax"])
     T = Float64(controls["magnetization"]["temperature_K"])
-    r2 = sv_second_kernel_weight(params, controls)
+    moment_sign = Float64(get(controls["magnetization"], "moment_sign", 1.0))
 
     draws = sv_make_draws(n_samples; seed)
     quad = sv_normal_quadrature(qn; zmax=qzmax)
 
-    Mdisp = sv_dispersive_magnetization_analytic(Bs, params, draws; S)
-    Mflat = sv_flat_magnetization_independent_spin(Bs, params, quad; temperature_K=T, S)
-    Mvv = params.chi_vv_muB_per_T .* Bs
-    Mtotal = Mdisp .+ r2 .* Mflat .+ Mvv
+    Mdisp_raw = sv_dispersive_magnetization_analytic(Bs, params, draws; S)
+    Mflat_raw = sv_flat_magnetization_independent_spin(Bs, params, quad; temperature_K=T, S)
 
-    if get(controls["magnetization"], "fit_vertical_scale", false)
-        data_on_grid = sv_interp1(data.B_T, data.M_muB_per_Yb, Bs)
-        scale = sv_best_vertical_scale(Mtotal, data_on_grid)
-    else
-        scale = 1.0
-    end
-    Mtotal_scaled = scale .* Mtotal
+    comp = sv_build_magnetization_comparison(Bs, Mdisp_raw, Mflat_raw, params, controls; moment_sign)
+    diag = sv_magnetization_scale_diagnostics(Bs, comp.M_combo_unscaled, comp.M_total_scaled, data)
+
+    @info "Magnetization scale convention: mean-field"         magnetization_global_scale=comp.magnetization_scale         diagnostic_scale_unscaled_combo=diag.diagnostic_scale_unscaled_combo         diagnostic_scale_primary_total=diag.diagnostic_scale_primary_total         normalize_weight=comp.normalize_second_kernel_weight         moment_sign=comp.moment_sign
 
     csv_path = joinpath(out_table_dir, "sunny_meanfield_magnetization.csv")
-    sv_write_xy_csv(csv_path,
-        "B_T,M_total_uB_per_Yb,M_disp_uB_per_Yb,M_flat_uB_per_Yb,M_vv_uB_per_Yb,second_kernel_weight,vertical_scale",
-        Bs, Mtotal_scaled, scale .* Mdisp, scale .* Mflat, scale .* Mvv, fill(r2, length(Bs)), fill(scale, length(Bs)))
+    sv_write_magnetization_csv(csv_path, Bs, comp, diag)
 
     fig = Figure(size=(950, 600))
     ax = Axis(fig[1,1], xlabel="B (T)", ylabel="M (μB / Yb)", title="Sunny validation: mean-field bridge")
     scatter!(ax, data.B_T, data.M_muB_per_Yb, label="experiment")
-    lines!(ax, Bs, Mtotal_scaled, label="total")
-    lines!(ax, Bs, scale .* Mdisp, label="dispersive")
-    lines!(ax, Bs, scale .* (r2 .* Mflat), label="flat × r2")
-    lines!(ax, Bs, scale .* Mvv, label="Van Vleck")
+    lines!(ax, Bs, comp.M_total_scaled, label="total × analytical scale")
+    lines!(ax, Bs, comp.M_disp_scaled, label="dispersive contrib")
+    lines!(ax, Bs, comp.M_flat_scaled, label="flat contrib")
+    lines!(ax, Bs, comp.M_vv_scaled, label="Van Vleck contrib")
+
+    if get(controls["magnetization"], "plot_diagnostic_scaled_curve", true)
+        lines!(ax, Bs, diag.diagnostic_scale_unscaled_combo .* comp.M_combo_unscaled,
+            label=@sprintf("diagnostic scaled total ×%.3g", diag.diagnostic_scale_unscaled_combo))
+    end
+
     axislegend(ax, position=:rb)
     fig_path = joinpath(out_fig_dir, "sunny_meanfield_magnetization.png")
     save(fig_path, fig)
 
-    @info "Saved mean-field Sunny validation" csv_path fig_path
-    return (; B_T=Bs, M_total=Mtotal_scaled, M_disp=scale .* Mdisp,
-        M_flat=scale .* Mflat, M_vv=scale .* Mvv, r2, scale, csv_path, fig_path)
+    @info "Saved mean-field Sunny validation" csv_path fig_path scale=comp.magnetization_scale normalize_weight=comp.normalize_second_kernel_weight moment_sign=comp.moment_sign
+    return (; B_T=Bs, M_total=comp.M_total_scaled, M_disp=comp.M_disp_scaled,
+        M_flat=comp.M_flat_scaled, M_vv=comp.M_vv_scaled, r2=comp.r2,
+        scale=comp.magnetization_scale, diagnostics=diag, csv_path, fig_path)
 end
 
 # -----------------------------------------------------------------------------
@@ -437,34 +587,47 @@ function sv_run_largecell_magnetization(repo_root::AbstractString; controls=sv_l
     include_exchange = get(lc, "include_exchange_disorder", true)
     include_gzz = get(lc, "include_gzz_disorder", true)
     maxiters = Int(lc["maxiters"])
-    r2 = sv_second_kernel_weight(params, controls)
+    moment_sign = Float64(get(lc, "moment_sign", -1.0))
 
-    Mdisp = sv_sweep_largecell_component(params, controls; component=:dispersive, Bs_T=Bs, dims, repeat_factor, include_exchange_disorder=include_exchange, include_gzz_disorder=include_gzz, maxiters)
-    Mflat = sv_sweep_largecell_component(params, controls; component=:flat, Bs_T=Bs, dims, repeat_factor, include_exchange_disorder=false, include_gzz_disorder=include_gzz, maxiters)
-    Mvv = params.chi_vv_muB_per_T .* Bs
-    Mtotal = Mdisp .+ r2 .* Mflat .+ Mvv
+    Mdisp_raw = sv_sweep_largecell_component(params, controls; component=:dispersive, Bs_T=Bs, dims, repeat_factor, include_exchange_disorder=include_exchange, include_gzz_disorder=include_gzz, maxiters)
+    Mflat_raw = sv_sweep_largecell_component(params, controls; component=:flat, Bs_T=Bs, dims, repeat_factor, include_exchange_disorder=false, include_gzz_disorder=include_gzz, maxiters)
+
+    comp = sv_build_magnetization_comparison(Bs, Mdisp_raw, Mflat_raw, params, controls; moment_sign)
 
     out_table_dir = sv_repo_path(repo_root, controls["paths"]["table_subdir"])
     out_fig_dir = sv_repo_path(repo_root, controls["paths"]["figure_subdir"])
     mkpath(out_table_dir); mkpath(out_fig_dir)
-    csv_path = joinpath(out_table_dir, "sunny_largecell_magnetization.csv")
-    sv_write_xy_csv(csv_path, "B_T,M_total_uB_per_Yb,M_disp_uB_per_Yb,M_flat_uB_per_Yb,M_vv_uB_per_Yb,second_kernel_weight", Bs, Mtotal, Mdisp, Mflat, Mvv, fill(r2, length(Bs)))
 
     mag_path = sv_repo_path(repo_root, controls["paths"]["magnetization_csv"])
     data = sv_read_magnetization_csv(mag_path)
+    diag = sv_magnetization_scale_diagnostics(Bs, comp.M_combo_unscaled, comp.M_total_scaled, data)
+
+    @info "Magnetization scale convention: large-cell"         magnetization_global_scale=comp.magnetization_scale         diagnostic_scale_unscaled_combo=diag.diagnostic_scale_unscaled_combo         diagnostic_scale_primary_total=diag.diagnostic_scale_primary_total         normalize_weight=comp.normalize_second_kernel_weight         moment_sign=comp.moment_sign
+
+    csv_path = joinpath(out_table_dir, "sunny_largecell_magnetization.csv")
+    sv_write_magnetization_csv(csv_path, Bs, comp, diag)
+
     fig = Figure(size=(950, 600))
     ax = Axis(fig[1,1], xlabel="B (T)", ylabel="M (μB / Yb)", title="Sunny validation: large-cell minimize_energy!")
     scatter!(ax, data.B_T, data.M_muB_per_Yb, label="experiment")
-    lines!(ax, Bs, Mtotal, label="total")
-    lines!(ax, Bs, Mdisp, label="dispersive Sunny")
-    lines!(ax, Bs, r2 .* Mflat, label="flat Sunny × r2")
-    lines!(ax, Bs, Mvv, label="Van Vleck")
+    lines!(ax, Bs, comp.M_total_scaled, label="total × analytical scale")
+    lines!(ax, Bs, comp.M_disp_scaled, label="dispersive Sunny contrib")
+    lines!(ax, Bs, comp.M_flat_scaled, label="flat Sunny contrib")
+    lines!(ax, Bs, comp.M_vv_scaled, label="Van Vleck contrib")
+
+    if get(controls["magnetization"], "plot_diagnostic_scaled_curve", true)
+        lines!(ax, Bs, diag.diagnostic_scale_unscaled_combo .* comp.M_combo_unscaled,
+            label=@sprintf("diagnostic scaled total ×%.3g", diag.diagnostic_scale_unscaled_combo))
+    end
+
     axislegend(ax, position=:rb)
     fig_path = joinpath(out_fig_dir, "sunny_largecell_magnetization.png")
     save(fig_path, fig)
 
-    @info "Saved large-cell Sunny validation" csv_path fig_path
-    return (; B_T=Bs, M_total=Mtotal, M_disp=Mdisp, M_flat=Mflat, M_vv=Mvv, r2, csv_path, fig_path)
+    @info "Saved large-cell Sunny validation" csv_path fig_path scale=comp.magnetization_scale normalize_weight=comp.normalize_second_kernel_weight moment_sign=comp.moment_sign
+    return (; B_T=Bs, M_total=comp.M_total_scaled, M_disp=comp.M_disp_scaled,
+        M_flat=comp.M_flat_scaled, M_vv=comp.M_vv_scaled, r2=comp.r2,
+        scale=comp.magnetization_scale, diagnostics=diag, csv_path, fig_path)
 end
 
 # -----------------------------------------------------------------------------

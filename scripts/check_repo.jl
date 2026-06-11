@@ -33,9 +33,14 @@ const BACKGROUND_COMPARE_CONTROLS_PATH = joinpath(
     "configs",
     "background_compare_controls.toml",
 )
+const SUNNY_VALIDATION_CONTROLS_PATH = joinpath(
+    REPO_ROOT,
+    "configs",
+    "sunny_validation_controls.toml",
+)
 
 println("Checking config files...")
-for path in (BEST_FIT_PATH, COFIT_SMOKE_CONTROLS_PATH, PLOT_2D_CONTROLS_PATH, BACKGROUND_COMPARE_CONTROLS_PATH)
+for path in (BEST_FIT_PATH, COFIT_SMOKE_CONTROLS_PATH, PLOT_2D_CONTROLS_PATH, BACKGROUND_COMPARE_CONTROLS_PATH, SUNNY_VALIDATION_CONTROLS_PATH)
     if !isfile(path)
         error("Missing required config file: $path")
     end
@@ -47,6 +52,12 @@ println("Loading canonical model parameters...")
 params = load_canonical_model_parameters(BEST_FIT_PATH)
 print_canonical_model_parameters(params)
 
+if !hasproperty(params, :magnetization_global_scale)
+    error("Canonical parameters did not load magnetization_global_scale")
+end
+println("  magnetization_global_scale: ", params.magnetization_global_scale)
+println()
+
 println("Loading co-fit smoke controls...")
 smoke_controls = load_cofit_controls(COFIT_SMOKE_CONTROLS_PATH)
 println("  fit name: ", smoke_controls["output"]["fit_name"])
@@ -57,6 +68,14 @@ println("Loading 2D plotting controls...")
 plot_controls = load_toml_config(PLOT_2D_CONTROLS_PATH)
 println("  2D data subdir: ", plot_controls["data"]["neutron_2d_subdir"])
 println("  output subdir: ", plot_controls["output"]["figure_subdir"])
+println()
+
+println("Loading Sunny validation controls...")
+sunny_controls = load_toml_config(SUNNY_VALIDATION_CONTROLS_PATH)
+println("  table subdir: ", sunny_controls["paths"]["table_subdir"])
+println("  figure subdir: ", sunny_controls["paths"]["figure_subdir"])
+println("  use magnetization scale from best fit: ",
+        sunny_controls["magnetization"]["use_magnetization_global_scale_from_best_fit"])
 println()
 
 # ---------------------------------------------------------------------------

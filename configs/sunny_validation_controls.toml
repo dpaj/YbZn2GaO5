@@ -42,10 +42,38 @@ Bmax_T = 7.0
 nB = 141
 temperature_K = 0.42
 
-# Scale convention for comparison to experiment.  This default leaves the Sunny
-# model in μB/Yb units.  Set fit_vertical_scale = true to least-squares scale to
-# the digitized experimental curve as a diagnostic.
-fit_vertical_scale = false
+# Scale convention for comparison to experiment.
+#
+# By default, the Sunny validation uses the analytical co-fit scale stored in:
+#
+#   [magnetization_extrinsic]
+#   magnetization_global_scale = ...
+#
+# in configs/best_fit_parameters.toml.  This scale multiplies the full unscaled
+# Sunny comparison curve, including chi_vv*B, matching the analytical co-fit CSV
+# convention.
+use_magnetization_global_scale_from_best_fit = true
+manual_magnetization_global_scale = 1.0
+
+# Magnetic component mixing convention.  With the default true value, the
+# relative second-kernel weight r2 is treated as a mixture ratio:
+#
+#   Mmag = (Mdisp + r2*Mflat)/(1+r2)
+#
+# Set false only as a diagnostic to reproduce the older unnormalized behavior.
+normalize_second_kernel_weight = true
+
+# Include the Van Vleck-like linear contribution from best_fit_parameters.toml.
+include_chi_vv = true
+
+# Mean-field bridge moment sign.  The analytic/mean-field convention should
+# usually already be positive for positive field.
+moment_sign = 1.0
+
+# Always write diagnostic best vertical scale factors to the CSV.  If true, the
+# plots also show a diagnostic-scaled total curve without changing the primary
+# analytical-scale curve.
+plot_diagnostic_scaled_curve = true
 
 [meanfield]
 # Mean-field bridge model.  This is a numerical version of the current analytical
@@ -64,6 +92,11 @@ include_exchange_disorder = true
 include_gzz_disorder = true
 maxiters = 1000
 randomize_each_field = false
+
+# Sunny may return spin/moment directions with the opposite sign convention from
+# the experimental M(B) plot.  The default -1 flips the large-cell output so that
+# positive field gives positive plotted magnetization.
+moment_sign = -1.0
 
 [kpm]
 # Sunny SpinWaveTheoryKPM validation.  This is the roughest first-pass script.

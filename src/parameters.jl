@@ -214,6 +214,19 @@ function canonical_model_parameters(config::Dict)
             value_key = "neutron_global_scale",
             log10_key = "log10_neutron_scale",
         ),
+
+        magnetization_global_scale = _lookup_positive_value_or_log10(
+            config;
+            sections = [
+                "magnetization_extrinsic",
+                "extrinsic",
+                "physical",
+                "initial_guess",
+                "parameters",
+            ],
+            value_key = "magnetization_global_scale",
+            log10_key = "log10_magnetization_global_scale",
+        ),
     )
 end
 
@@ -227,15 +240,14 @@ function load_canonical_model_parameters(path::AbstractString)
     return canonical_model_parameters(config)
 end
 
-
 """
     canonical_model_parameters_dict(params)
 
 Convert the canonical parameter NamedTuple into a `Dict{Symbol,Float64}` for
 legacy plotting/model code that expects dictionary-style parameter access.
 
-The returned dictionary still uses the canonical science-facing keys:
-`sigma_J` and `gperp_ratio`.
+The returned dictionary uses canonical science-facing keys, including
+`sigma_J`, `gperp_ratio`, and `magnetization_global_scale`.
 """
 function canonical_model_parameters_dict(params::NamedTuple)
     return Dict{Symbol,Float64}(
@@ -254,6 +266,7 @@ function canonical_model_parameters_dict(params::NamedTuple)
 
         :second_kernel_relative_intensity => params.second_kernel_relative_intensity,
         :neutron_global_scale => params.neutron_global_scale,
+        :magnetization_global_scale => params.magnetization_global_scale,
     )
 end
 

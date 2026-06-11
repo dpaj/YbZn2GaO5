@@ -5,7 +5,7 @@
 # This uses the same canonical best-fit parameters as the analytical co-fit and
 # constructs two Sunny components:
 #
-#   total = Sunny dispersive component + r2 * Sunny flat component + chi_vv B
+#   total = magnetization_global_scale * [(Sunny dispersive + r2*Sunny flat)/(1+r2) + chi_vv B]
 #
 # The first version is deliberately small/cheap.  Increase dims/repeat_factor in
 # configs/sunny_validation_controls.toml only after the basic calculation works.
