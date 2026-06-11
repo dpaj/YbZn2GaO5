@@ -1,0 +1,82 @@
+# configs/sunny_validation_controls.toml
+#
+# Preliminary Sunny.jl validation controls for the YbZn2GaO5 repo.
+# These scripts use the same canonical parameter file as the analytical co-fit:
+#
+#   configs/best_fit_parameters.toml
+#
+# The goal is validation, not replacement, of the fast analytical polarized-phase
+# calculator.  The long-term goal is to use Sunny.jl for things the analytical
+# polarized model cannot do, especially zero-field magnetic correlations.
+
+[paths]
+best_fit_parameters_toml = "configs/best_fit_parameters.toml"
+magnetization_csv = "data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv"
+neutron_1d_dir = "data/neutron/CNCS_1d_scans"
+cif_path = "data/cif/ICSD_CollCode138765.cif"
+figure_subdir = "results/figures/sunny_validation"
+table_subdir = "results/feature_tables/sunny_validation"
+
+[common]
+# Current validation target: field-polarized H || c.
+field_direction = [0.0, 0.0, 1.0]
+fields_T = [9.0, 14.0]
+spin_S = 0.5
+seed = 20260611
+
+# Effective triangular-lattice geometry used by the preliminary Sunny builders.
+# The analytical comparison uses reciprocal coordinates more than absolute lengths,
+# so these lengths mostly set plotting/convention scales for Sunny.
+lattice_a_angstrom = 3.4
+lattice_c_angstrom = 10.0
+
+[weights]
+# For the current shared-fraction co-fit, the same relative second-kernel weight
+# is used as the default total-model mixing coefficient.
+use_second_kernel_relative_intensity_from_best_fit = true
+manual_second_kernel_relative_intensity = 0.1579822309
+
+[magnetization]
+Bmin_T = 0.0
+Bmax_T = 7.0
+nB = 141
+temperature_K = 0.42
+
+# Scale convention for comparison to experiment.  This default leaves the Sunny
+# model in μB/Yb units.  Set fit_vertical_scale = true to least-squares scale to
+# the digitized experimental curve as a diagnostic.
+fit_vertical_scale = false
+
+[meanfield]
+# Mean-field bridge model.  This is a numerical version of the current analytical
+# ingredients rather than a full Sunny minimization.
+mode = "linear_saturation"
+n_disorder_samples = 50000
+normal_quad_n = 301
+normal_quad_zmax = 5.0
+
+[largecell]
+# Sunny minimize_energy! validation.  Keep this intentionally cheap at first.
+# Increase dims/repeat_factor only after the initial script runs.
+dims = [4, 4, 1]
+repeat_factor = [1, 1, 1]
+include_exchange_disorder = true
+include_gzz_disorder = true
+maxiters = 1000
+randomize_each_field = false
+
+[kpm]
+# Sunny SpinWaveTheoryKPM validation.  This is the roughest first-pass script.
+dims = [3, 3, 1]
+repeat_factor = [4, 4, 1]
+include_exchange_disorder = true
+include_gzz_disorder = true
+maxiters = 1000
+tol = 0.05
+kernel_fwhm_meV = 0.08
+energy_min_meV = 0.0
+energy_max_meV = 4.0
+n_energy = 161
+
+# Experimental 1D q cuts to validate first.  The exact 2D path can be added later.
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
