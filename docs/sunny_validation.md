@@ -172,3 +172,64 @@ flat_weight = flat_to_dispersive_fraction * gperp_ratio^2
 ```
 
 This keeps the fitted population/weight fraction distinct from the effective neutron matrix-element ratio.
+
+
+## Parameter-mapping check
+
+To verify that Sunny is using the same canonical parameter set as the analytical
+co-fit, run:
+
+```powershell
+julia --project=. scripts/check_sunny_parameter_mapping.jl
+```
+
+This prints and writes:
+
+```text
+results/feature_tables/sunny_validation/sunny_parameter_mapping.csv
+```
+
+The important convention is:
+
+```text
+dispersive Sunny component:
+    gzz, J1_meV, J2_meV, sigma_gzz, sigma_J
+
+flat Sunny component:
+    gzz2, sigma_gzz2, J1 = J2 = 0
+
+neutron flat weight:
+    flat_weight = second_kernel_relative_intensity * gperp_ratio^2
+```
+
+The Sunny transverse `gxy` is an intensity gauge required by `ssf_perp`; it is
+not the fitted physical `gperp`.
+
+## Sunny KPM 2D path map
+
+A model-only 2D KPM map can be generated with:
+
+```powershell
+julia --project=. scripts/sunny_plot_kpm_2d.jl
+```
+
+The q path and field are controlled by:
+
+```toml
+[kpm_2d]
+field_T = 9.0
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+n_per_segment = 41
+neutron_scale_mode = "best_fit"
+z_mode = "linear"
+```
+
+This writes:
+
+```text
+results/figures/sunny_validation/sunny_kpm_2d_path_9T.png
+results/feature_tables/sunny_validation/sunny_kpm_2d_path_9T.csv
+```
+
+The 2D map is a Sunny model calculation only.  It does not yet overlay the
+experimental 2D CNCS data or apply a fitted experimental 2D scale.

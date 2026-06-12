@@ -1723,4 +1723,305 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
     return (; rows=all_rows, fig_path, inventory_path, cuts, scale_mode, scale_scope, global_scale, fallback_neutron_scale)
 end
 
+
+# -----------------------------------------------------------------------------
+# Sunny parameter-mapping diagnostics
+# -----------------------------------------------------------------------------
+
+function sv_check_sunny_parameter_mapping(repo_root::AbstractString; controls=sv_load_controls(repo_root))
+    (; params, path) = sv_load_params(repo_root, controls)
+    kpm_sizectl = sv_system_size_controls(controls, "kpm")
+    large_sizectl = sv_system_size_controls(controls, "largecell")
+    r2 = sv_second_kernel_weight(params, controls)
+    flat_weight = sv_flat_neutron_weight(params, controls)
+    gxy = sv_sunny_transverse_gxy(controls)
+    fallback_neutron_scale = sv_neutron_scale(params, controls)
+
+    println("Sunny / analytical parameter mapping")
+    println("------------------------------------")
+    println("Parameter TOML: ", path)
+    println()
+    print_canonical_model_parameters(params)
+
+    println("Hamiltonian parameters passed to Sunny")
+    println("  dispersive: gzz=$(params.gzz), J1=$(params.J1_meV) meV, J2=$(params.J2_meV) meV")
+    println("              sigma_gzz=$(params.sigma_gzz), sigma_J=$(params.sigma_J)")
+    println("  flat:       gzz2=$(params.gzz2), J1=0, J2=0, sigma_gzz2=$(params.sigma_gzz2)")
+    println()
+    println("Neutron intensity / mixture conventions")
+    println("  second_kernel_relative_intensity / flat_to_dispersive_fraction = ", r2)
+    println("  gperp_ratio = ", params.gperp_ratio)
+    println("  flat_weight used in neutron KPM = r2 * gperp_ratio^2 = ", flat_weight)
+    println("  Sunny transverse gxy gauge = ", gxy)
+    println("  reference neutron_global_scale = ", fallback_neutron_scale)
+    println()
+    println("Sunny finite-size controls")
+    println("  KPM       dims=$(kpm_sizectl.dims), repeat_factor=$(kpm_sizectl.repeat_factor), system_size=$(kpm_sizectl.system_size)")
+    println("  largecell dims=$(large_sizectl.dims), repeat_factor=$(large_sizectl.repeat_factor), system_size=$(large_sizectl.system_size)")
+
+    out_table_dir = sv_repo_path(repo_root, controls["paths"]["table_subdir"])
+    mkpath(out_table_dir)
+    out_path = joinpath(out_table_dir, "sunny_parameter_mapping.csv")
+    names = String[
+        "gzz", "J1_meV", "J2_meV", "sigma_gzz", "sigma_J",
+        "gzz2", "sigma_gzz2", "gperp_ratio", "chi_vv_muB_per_T",
+        "second_kernel_relative_intensity", "flat_weight_r2_gperp_ratio_sq",
+        "neutron_global_scale", "magnetization_global_scale",
+        "sunny_transverse_gxy",
+        "kpm_dims", "kpm_repeat_factor", "kpm_system_size",
+        "largecell_dims", "largecell_repeat_factor", "largecell_system_size",
+    ]
+    values = Any[
+        params.gzz, params.J1_meV, params.J2_meV, params.sigma_gzz, params.sigma_J,
+        params.gzz2, params.sigma_gzz2, params.gperp_ratio, params.chi_vv_muB_per_T,
+        r2, flat_weight, params.neutron_global_scale, params.magnetization_global_scale,
+        gxy,
+        string(kpm_sizectl.dims), string(kpm_sizectl.repeat_factor), string(kpm_sizectl.system_size),
+        string(large_sizectl.dims), string(large_sizectl.repeat_factor), string(large_sizectl.system_size),
+    ]
+    categories = String[
+        "canonical", "canonical", "canonical", "canonical", "canonical",
+        "canonical", "canonical", "canonical", "canonical",
+        "mixture", "derived_neutron_weight",
+        "extrinsic", "extrinsic", "sunny_neutron_gauge",
+        "sunny_finite_size", "sunny_finite_size", "sunny_finite_size",
+        "sunny_finite_size", "sunny_finite_size", "sunny_finite_size",
+    ]
+    sv_write_xy_csv(out_path, "name,value,category", names, values, categories)
+    println()
+    println("Wrote mapping table:")
+    println(out_path)
+    return (; params, path, r2, flat_weight, sunny_transverse_gxy=gxy, kpm_sizectl, large_sizectl, out_path)
+end
+
+
+# -----------------------------------------------------------------------------
+# KPM 2D path-map utilities
+# -----------------------------------------------------------------------------
+
+function sv_kpm_2d_controls(controls::Dict)
+    return get(controls, "kpm_2d", Dict{String,Any}())
+end
+
+function sv_q_path_from_tags(qtags::Vector{String}; n_per_segment::Integer=41)
+    length(qtags) >= 2 || error("Need at least two qtags for a 2D path map")
+    n_per_segment >= 2 || error("n_per_segment must be >= 2")
+
+    qs = Vector{Vector{Float64}}()
+    x = Float64[]
+    tick_positions = Float64[]
+    tick_labels = String[]
+
+    xpos = 0.0
+    for iseg in 1:(length(qtags)-1)
+        q0 = Float64.(sv_qtag_to_q(qtags[iseg]))
+        q1 = Float64.(sv_qtag_to_q(qtags[iseg+1]))
+        seglen = norm(q1 .- q0)
+        if iseg == 1
+            push!(tick_positions, xpos)
+            push!(tick_labels, qtags[iseg])
+        end
+        for j in 1:n_per_segment
+            if iseg > 1 && j == 1
+                continue
+            end
+            t = (j - 1) / (n_per_segment - 1)
+            q = (1 - t) .* q0 .+ t .* q1
+            push!(qs, q)
+            push!(x, xpos + t * seglen)
+        end
+        xpos += seglen
+        push!(tick_positions, xpos)
+        push!(tick_labels, qtags[iseg+1])
+    end
+
+    return (; qs, x, tick_positions, tick_labels)
+end
+
+function sv_orient_sunny_intensity_matrix(raw, nE::Integer, nq::Integer)
+    if raw isa AbstractVector
+        nq == 1 || error("Sunny returned a vector intensity for nq=$nq; expected a matrix")
+        return reshape(Float64.(raw), nE, 1)
+    elseif raw isa AbstractMatrix
+        r, c = size(raw)
+        if r == nE && c == nq
+            return Matrix{Float64}(raw)
+        elseif r == nq && c == nE
+            return permutedims(Matrix{Float64}(raw))
+        elseif r == nE && c != nq
+            @warn "Sunny intensity matrix has energy rows but unexpected q columns; trimming/padding" size_raw=size(raw) nE nq
+            out = fill(NaN, nE, nq)
+            n = min(c, nq)
+            out[:, 1:n] .= Float64.(raw[:, 1:n])
+            return out
+        elseif c == nE && r != nq
+            @warn "Sunny intensity matrix has energy columns but unexpected q rows; trimming/padding" size_raw=size(raw) nE nq
+            tmp = permutedims(Matrix{Float64}(raw))
+            out = fill(NaN, nE, nq)
+            n = min(size(tmp, 2), nq)
+            out[:, 1:n] .= tmp[:, 1:n]
+            return out
+        else
+            v = vec(Float64.(raw))
+            if length(v) >= nE * nq
+                return reshape(v[1:(nE*nq)], nE, nq)
+            end
+            error("Could not orient Sunny intensity matrix of size $(size(raw)) for nE=$nE nq=$nq")
+        end
+    else
+        error("Unsupported Sunny intensity container type: $(typeof(raw))")
+    end
+end
+
+function sv_kpm_component_spectra_for_qs(params, controls::Dict; component::Symbol, field_T::Real, qs::Vector{Vector{Float64}})
+    kc = controls["kpm"]
+    sizectl = sv_system_size_controls(controls, "kpm")
+    dims = sizectl.dims
+    repeat_factor = sizectl.repeat_factor
+    include_exchange = get(kc, "include_exchange_disorder", true)
+    include_gzz = get(kc, "include_gzz_disorder", true)
+    maxiters = Int(kc["maxiters"])
+
+    base = sv_build_effective_sunny_system(params, controls; component, dims, field_T)
+    sys = base.sys
+    if repeat_factor != (1,1,1)
+        sys = to_inhomogeneous(repeat_periodically(sys, repeat_factor))
+    else
+        sys = to_inhomogeneous(sys)
+    end
+    sv_apply_disorder!(sys, params, controls; component, include_exchange=include_exchange, include_gzz=include_gzz)
+
+    randomize_spins!(sys)
+    minimize_energy!(sys; maxiters)
+
+    energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
+    kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
+    swt = SpinWaveTheoryKPM(sys; measure=ssf_perp(sys), tol=Float64(kc["tol"]))
+    res = intensities(swt, qs; energies, kernel)
+    raw = sv_try_extract_sunny_intensity(res)
+    I = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))
+    return (; energy_meV=energies, intensity=I, result=res)
+end
+
+function sv_kpm_2d_neutron_scale(params, controls::Dict)
+    k2 = sv_kpm_2d_controls(controls)
+    mode = Symbol(get(k2, "neutron_scale_mode", "best_fit"))
+    if mode == :best_fit
+        return sv_neutron_scale(params, controls)
+    elseif mode == :manual
+        return Float64(get(k2, "manual_neutron_scale", get(controls["kpm"], "manual_neutron_global_scale", 1.0)))
+    else
+        @warn "kpm_2d neutron_scale_mode=$mode requires experimental data and is not available for a model-only 2D map; using best_fit/reference scale"
+        return sv_neutron_scale(params, controls)
+    end
+end
+
+function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_controls(repo_root))
+    (; params, path) = sv_load_params(repo_root, controls)
+    print_canonical_model_parameters(params)
+    @info "Sunny validation: KPM 2D path map" sunny_version=sv_try_pkgversion(Sunny) params_path=path
+
+    out_table_dir = sv_repo_path(repo_root, controls["paths"]["table_subdir"])
+    out_fig_dir = sv_repo_path(repo_root, controls["paths"]["figure_subdir"])
+    mkpath(out_table_dir); mkpath(out_fig_dir)
+
+    k2 = sv_kpm_2d_controls(controls)
+    B = Float64(get(k2, "field_T", first(Float64.(controls["common"]["fields_T"]))))
+    qtags = String.(get(k2, "qtags", controls["kpm"]["qtags"]))
+    n_per_segment = Int(get(k2, "n_per_segment", 41))
+    pathinfo = sv_q_path_from_tags(qtags; n_per_segment=n_per_segment)
+
+    flat_to_dispersive_fraction = sv_second_kernel_weight(params, controls)
+    flat_weight = sv_flat_neutron_weight(params, controls)
+    neutron_scale = sv_kpm_2d_neutron_scale(params, controls)
+    sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
+    kpm_sizectl = sv_system_size_controls(controls, "kpm")
+
+    @info "KPM 2D convention" B_T=B qtags flat_to_dispersive_fraction flat_weight neutron_scale sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size n_q=length(pathinfo.qs)
+
+    @info "Computing 2D dispersive KPM map" B_T=B n_q=length(pathinfo.qs)
+    disp = sv_kpm_component_spectra_for_qs(params, controls; component=:dispersive, field_T=B, qs=pathinfo.qs)
+    @info "Computing 2D flat KPM map" B_T=B n_q=length(pathinfo.qs)
+    flat = sv_kpm_component_spectra_for_qs(params, controls; component=:flat, field_T=B, qs=pathinfo.qs)
+
+    Itotal_unscaled = disp.intensity .+ flat_weight .* flat.intensity
+    Itotal_scaled = neutron_scale .* Itotal_unscaled
+    Idisp_scaled = neutron_scale .* disp.intensity
+    Iflat_scaled = neutron_scale .* flat_weight .* flat.intensity
+
+    basename_tag = get(k2, "output_tag", @sprintf("%gT", B))
+    csv_path = joinpath(out_table_dir, "sunny_kpm_2d_path_$(basename_tag).csv")
+    nE = length(disp.energy_meV)
+    nq = length(pathinfo.qs)
+    rows = nE * nq
+    q_index = Int[]
+    path_coordinate = Float64[]
+    qx = Float64[]
+    qy = Float64[]
+    qz = Float64[]
+    energy_col = Float64[]
+    total_scaled_col = Float64[]
+    disp_scaled_col = Float64[]
+    flat_scaled_col = Float64[]
+    total_unscaled_col = Float64[]
+    disp_unscaled_col = Float64[]
+    flat_unweighted_col = Float64[]
+
+    for iq in 1:nq
+        q = pathinfo.qs[iq]
+        for iE in 1:nE
+            push!(q_index, iq)
+            push!(path_coordinate, pathinfo.x[iq])
+            push!(qx, q[1]); push!(qy, q[2]); push!(qz, q[3])
+            push!(energy_col, disp.energy_meV[iE])
+            push!(total_scaled_col, Itotal_scaled[iE, iq])
+            push!(disp_scaled_col, Idisp_scaled[iE, iq])
+            push!(flat_scaled_col, Iflat_scaled[iE, iq])
+            push!(total_unscaled_col, Itotal_unscaled[iE, iq])
+            push!(disp_unscaled_col, disp.intensity[iE, iq])
+            push!(flat_unweighted_col, flat.intensity[iE, iq])
+        end
+    end
+
+    sv_write_xy_csv(csv_path,
+        "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy",
+        q_index, path_coordinate, qx, qy, qz, energy_col,
+        total_scaled_col, disp_scaled_col, flat_scaled_col, total_unscaled_col, disp_unscaled_col, flat_unweighted_col,
+        fill(neutron_scale, rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows)
+    )
+
+    z_mode = Symbol(get(k2, "z_mode", "linear"))
+    z_floor = Float64(get(k2, "log10_floor", 1e-12))
+    Z = if z_mode == :log10
+        log10.(max.(Itotal_scaled, z_floor))
+    elseif z_mode == :linear
+        Itotal_scaled
+    else
+        error("Unknown [kpm_2d] z_mode=$z_mode. Use linear or log10.")
+    end
+
+    fig = Figure(size=(1100, 760))
+    ax = Axis(fig[1, 1],
+        xlabel = "Q path",
+        ylabel = "Energy transfer (meV)",
+        title = @sprintf("Sunny KPM 2D path map, B = %.3g T", B),
+        xticks = (pathinfo.tick_positions, pathinfo.tick_labels),
+    )
+    hm = heatmap!(ax, pathinfo.x, disp.energy_meV, permutedims(Z))
+    for xp in pathinfo.tick_positions
+        vlines!(ax, [xp], linewidth=1)
+    end
+    if haskey(k2, "energy_ylim_meV")
+        yl = Float64.(k2["energy_ylim_meV"])
+        length(yl) == 2 && ylims!(ax, yl[1], yl[2])
+    end
+    Colorbar(fig[1, 2], hm, label = z_mode == :log10 ? "log10 intensity" : "Intensity (scaled arb.)")
+    fig_path = joinpath(out_fig_dir, "sunny_kpm_2d_path_$(basename_tag).png")
+    save(fig_path, fig)
+
+    @info "Saved Sunny KPM 2D path map" fig_path csv_path
+    return (; fig_path, csv_path, field_T=B, qtags, energy_meV=disp.energy_meV, x=pathinfo.x, Itotal_scaled, Idisp_scaled, Iflat_scaled)
+end
+
+
 end # module

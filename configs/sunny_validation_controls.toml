@@ -100,7 +100,7 @@ moment_sign = -1.0
 # `system_size` is the final inhomogeneous Sunny supercell used for KPM.
 # `dims` is the smaller seed system constructed before repeat_periodically.
 # If `system_size` is present, repeat_factor is derived as system_size ./ dims.
-system_size = [24, 24, 1]
+system_size = [12, 12, 1]
 dims = [3, 3, 1]
 repeat_factor = [4, 4, 1]
 include_exchange_disorder = true
@@ -197,3 +197,23 @@ neutron_scale_max_abs = 1e8
 include_gperp_ratio_intensity_weight = true
 
 plot_ylim = [-0.0005, 0.0030]
+
+
+[kpm_2d]
+# Model-only Sunny 2D path map.  This uses the same canonical best-fit
+# parameters and the same KPM finite-size/extrinsic controls as [kpm].
+field_T = 9.0
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+n_per_segment = 41
+
+# Because this is a model-only map, least-squares / max-match scaling cannot be
+# determined unless experimental 2D data are added later.  Use "best_fit" as a
+# reference scale or "manual" for a visual diagnostic.
+neutron_scale_mode = "best_fit"
+manual_neutron_scale = 1.0
+
+# linear or log10.  log10 can be useful when the KPM map has a broad dynamic range.
+z_mode = "linear"
+log10_floor = 1e-12
+energy_ylim_meV = [0.0, 4.0]
+output_tag = "9T"
