@@ -101,7 +101,7 @@ moment_sign = -1.0
 # `system_size` is the final inhomogeneous Sunny supercell used for KPM.
 # `dims` is the smaller seed system constructed before repeat_periodically.
 # If `system_size` is present, repeat_factor is derived as system_size ./ dims.
-system_size = [64, 64, 1]
+system_size = [36, 36, 1]
 dims = [3, 3, 1]
 repeat_factor = [12, 12, 1]
 include_exchange_disorder = true
@@ -235,3 +235,19 @@ model_clip_high_quantile = 0.995
 mask_zero_intensity = false
 save_pdf = false
 
+
+[kpm_2d.q_averaging]
+# Momentum broadening / finite Q-bin averaging for the Sunny KPM 2D model.
+# This is the missing analogue of the analytical model's momentum broadening.
+# The first-pass default uses a deterministic 3 x 3 Gaussian quadrature in H,K
+# around each displayed path-center Q.  Increase n_h/n_k or grid_nsigma for a
+# closer but slower approximation; disable for path-center-only diagnostics.
+enabled = true
+mode = "gaussian_grid"
+n_h = 3
+n_k = 3
+n_l = 1
+sigma_H_rlu = 0.037
+sigma_K_rlu = 0.037
+sigma_L_rlu = 0.0
+grid_nsigma = 1.5

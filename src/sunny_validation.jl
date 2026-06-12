@@ -1910,6 +1910,107 @@ function sv_kpm_2d_controls(controls::Dict)
     return get(controls, "kpm_2d", Dict{String,Any}())
 end
 
+
+function sv_kpm_2d_q_averaging_controls(k2)
+    qa = get(k2, "q_averaging", Dict{String,Any}())
+    qa isa Dict || (qa = Dict{String,Any}())
+    enabled = Bool(get(qa, "enabled", false))
+    mode = Symbol(get(qa, "mode", "gaussian_grid"))
+    n_h = Int(get(qa, "n_h", get(qa, "n_H", 3)))
+    n_k = Int(get(qa, "n_k", get(qa, "n_K", 3)))
+    n_l = Int(get(qa, "n_l", get(qa, "n_L", 1)))
+    sigma_H = Float64(get(qa, "sigma_H_rlu", 0.0))
+    sigma_K = Float64(get(qa, "sigma_K_rlu", 0.0))
+    sigma_L = Float64(get(qa, "sigma_L_rlu", 0.0))
+    grid_nsigma = Float64(get(qa, "grid_nsigma", 1.5))
+    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma)
+end
+
+function sv_gaussian_grid_axis(n::Integer, sigma::Real, grid_nsigma::Real)
+    n = Int(n)
+    sig = Float64(sigma)
+    if n <= 1 || sig <= 0
+        return ([0.0], [1.0])
+    end
+    xs = collect(range(-Float64(grid_nsigma)*sig, Float64(grid_nsigma)*sig; length=n))
+    ws = exp.(-0.5 .* (xs ./ sig).^2)
+    sw = sum(ws)
+    if !(isfinite(sw) && sw > 0)
+        ws .= 1.0 / length(ws)
+    else
+        ws ./= sw
+    end
+    return (xs, collect(ws))
+end
+
+function sv_kpm_2d_q_average_offsets(k2)
+    ctl = sv_kpm_2d_q_averaging_controls(k2)
+    if !ctl.enabled
+        return (; enabled=false, mode=ctl.mode, offsets=[[0.0, 0.0, 0.0]], weights=[1.0],
+            n_samples=1, sigma_H=ctl.sigma_H, sigma_K=ctl.sigma_K, sigma_L=ctl.sigma_L,
+            n_h=1, n_k=1, n_l=1, grid_nsigma=ctl.grid_nsigma)
+    end
+    ctl.mode == :gaussian_grid || error("Unsupported [kpm_2d.q_averaging].mode=$(ctl.mode). Currently use gaussian_grid.")
+    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma)
+    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma)
+    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma)
+    offsets = Vector{Vector{Float64}}()
+    weights = Float64[]
+    for (ih, dh) in enumerate(hs), (ik, dk) in enumerate(ks), (il, dl) in enumerate(ls)
+        push!(offsets, [Float64(dh), Float64(dk), Float64(dl)])
+        push!(weights, wh[ih] * wk[ik] * wl[il])
+    end
+    sw = sum(weights)
+    if !(isfinite(sw) && sw > 0)
+        weights .= 1.0 / length(weights)
+    else
+        weights ./= sw
+    end
+    return (; enabled=true, mode=ctl.mode, offsets, weights, n_samples=length(weights),
+        sigma_H=ctl.sigma_H, sigma_K=ctl.sigma_K, sigma_L=ctl.sigma_L,
+        n_h=length(hs), n_k=length(ks), n_l=length(ls), grid_nsigma=ctl.grid_nsigma)
+end
+
+function sv_expand_qs_for_q_averaging(qs::Vector{Vector{Float64}}, qavg)
+    if !qavg.enabled
+        return qs
+    end
+    qflat = Vector{Vector{Float64}}()
+    sizehint!(qflat, length(qs) * qavg.n_samples)
+    for q in qs
+        q0 = Float64.(q)
+        for off in qavg.offsets
+            push!(qflat, q0 .+ off)
+        end
+    end
+    return qflat
+end
+
+function sv_average_qsampled_intensity(Iflat::AbstractMatrix, nq::Integer, qavg)
+    nE, ncols = size(Iflat)
+    if !qavg.enabled
+        ncols == nq || error("Expected $nq q columns but got $ncols")
+        return Matrix{Float64}(Iflat)
+    end
+    ns = qavg.n_samples
+    ncols == nq * ns || error("Expected $(nq*ns) q-sampled columns but got $ncols")
+    out = zeros(Float64, nE, nq)
+    for iq in 1:nq
+        base = (iq - 1) * ns
+        for is in 1:ns
+            out[:, iq] .+= qavg.weights[is] .* Iflat[:, base + is]
+        end
+    end
+    return out
+end
+
+function sv_kpm_component_spectra_for_qs_qaveraged(params, controls::Dict; component::Symbol, field_T::Real, qs::Vector{Vector{Float64}}, qavg)
+    qflat = sv_expand_qs_for_q_averaging(qs, qavg)
+    spec = sv_kpm_component_spectra_for_qs(params, controls; component, field_T, qs=qflat)
+    Iavg = sv_average_qsampled_intensity(spec.intensity, length(qs), qavg)
+    return (; energy_meV=spec.energy_meV, intensity=Iavg, result=spec.result, q_averaging=qavg, n_q_centers=length(qs), n_q_evaluated=length(qflat))
+end
+
 function sv_q_path_from_tags(qtags::Vector{String}; n_per_segment::Integer=41)
     length(qtags) >= 2 || error("Need at least two qtags for a 2D path map")
     n_per_segment >= 2 || error("n_per_segment must be >= 2")
@@ -2290,8 +2391,9 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     scale_mode = Symbol(get(k2, "neutron_scale_mode", "global_least_squares"))
     sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
+    qavg = sv_kpm_2d_q_average_offsets(k2)
 
-    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets())
+    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L
 
     raw_models = Dict{Float64,Any}()
     model_on_scan_grid = Dict{Float64,Matrix{Float64}}()
@@ -2299,11 +2401,11 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
         haskey(scans, B) || continue
         scan = scans[B]
         qs = sv_kpm_2d_oldpath_qs_from_x(scan.x; leg=leg)
-        @info "Computing Sunny KPM 2D map on experimental path" field_T=B leg n_q=length(qs)
-        disp = sv_kpm_component_spectra_for_qs(params, controls; component=:dispersive, field_T=B, qs=qs)
-        flat = sv_kpm_component_spectra_for_qs(params, controls; component=:flat, field_T=B, qs=qs)
+        @info "Computing Sunny KPM 2D map on experimental path" field_T=B leg n_q=length(qs) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples n_q_evaluated=length(qs)*qavg.n_samples
+        disp = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:dispersive, field_T=B, qs=qs, qavg=qavg)
+        flat = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:flat, field_T=B, qs=qs, qavg=qavg)
         Itotal_unscaled = disp.intensity .+ flat_weight .* flat.intensity
-        raw_models[B] = (; disp, flat, Itotal_unscaled, qs)
+        raw_models[B] = (; disp, flat, Itotal_unscaled, qs, q_averaging=qavg)
         model_on_scan_grid[B] = sv_model_to_scan_energy_grid(disp.energy_meV, Itotal_unscaled, scan)
     end
 
@@ -2360,10 +2462,11 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
         tag = @sprintf("%gT_leg%d", B, leg)
         csv_path = joinpath(out_table_dir, "sunny_kpm_2d_data_model_$(tag).csv")
         sv_write_xy_csv(csv_path,
-            "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,neutron_scale_mode,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy",
+            "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,neutron_scale_mode,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy,q_average_enabled,q_average_n_samples,q_average_sigma_H_rlu,q_average_sigma_K_rlu,q_average_sigma_L_rlu",
             q_index, path_coordinate, qx, qy, qz, energy_col,
             total_scaled, disp_scaled, flat_scaled, total_unscaled, disp_unscaled, flat_unweighted,
             fill(scale, rows), fill(String(scale_mode), rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows),
+            fill(qavg.enabled, rows), fill(qavg.n_samples, rows), fill(qavg.sigma_H, rows), fill(qavg.sigma_K, rows), fill(qavg.sigma_L, rows),
         )
         csv_paths[B] = csv_path
     end
@@ -2372,7 +2475,8 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     fields_have = sort(collect(keys(raw_models)))
     ncols = length(fields_have)
     fig = Figure(size=(1180, 850), fontsize=16)
-    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K", leg), fontsize=21, font=:bold, tellwidth=false)
+    qavg_label = qavg.enabled ? string(", Q-avg ", qavg.n_samples, " samples") : ", path centers"
+    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K%s", leg, qavg_label), fontsize=21, font=:bold, tellwidth=false)
 
     energy_ylim = Float64.(get(k2, "energy_ylim_meV", [0.20, 3.20]))
     xlim = haskey(k2, "xlim") ? Float64.(k2["xlim"]) : nothing
@@ -2454,13 +2558,14 @@ function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_cont
     neutron_scale = sv_kpm_2d_neutron_scale(params, controls)
     sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
+    qavg = sv_kpm_2d_q_average_offsets(k2)
 
-    @info "KPM 2D convention" B_T=B qtags flat_to_dispersive_fraction flat_weight neutron_scale sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size n_q=length(pathinfo.qs)
+    @info "KPM 2D convention" B_T=B qtags flat_to_dispersive_fraction flat_weight neutron_scale sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size n_q=length(pathinfo.qs) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L
 
-    @info "Computing 2D dispersive KPM map" B_T=B n_q=length(pathinfo.qs)
-    disp = sv_kpm_component_spectra_for_qs(params, controls; component=:dispersive, field_T=B, qs=pathinfo.qs)
-    @info "Computing 2D flat KPM map" B_T=B n_q=length(pathinfo.qs)
-    flat = sv_kpm_component_spectra_for_qs(params, controls; component=:flat, field_T=B, qs=pathinfo.qs)
+    @info "Computing 2D dispersive KPM map" B_T=B n_q=length(pathinfo.qs) n_q_evaluated=length(pathinfo.qs)*qavg.n_samples
+    disp = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:dispersive, field_T=B, qs=pathinfo.qs, qavg=qavg)
+    @info "Computing 2D flat KPM map" B_T=B n_q=length(pathinfo.qs) n_q_evaluated=length(pathinfo.qs)*qavg.n_samples
+    flat = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:flat, field_T=B, qs=pathinfo.qs, qavg=qavg)
 
     Itotal_unscaled = disp.intensity .+ flat_weight .* flat.intensity
     Itotal_scaled = neutron_scale .* Itotal_unscaled
