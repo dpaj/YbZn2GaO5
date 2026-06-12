@@ -27,4 +27,5 @@ result = SunnyValidation.sv_run_kpm_1d(REPO_ROOT; controls)
 
 println()
 println("Sunny KPM 1D validation completed.")
-println("Figure: ", result.fig_path)
+println("Figure:    ", result.fig_path)
+println("Inventory: ", result.inventory_path)
