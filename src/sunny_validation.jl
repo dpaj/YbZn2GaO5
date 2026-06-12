@@ -1436,14 +1436,32 @@ end
 
 
 function sv_qtag_to_q(qtag::AbstractString)
-    if qtag == "0_1_0"
+    # qtags are expressed in the same analytical / Mantid-style HKL convention
+    # used throughout the co-fit scripts.  Do not apply a K -> -K transform here.
+    if qtag in ("0_0_0", "Gamma", "gamma", "Γ")
+        return [0.0, 0.0, 0.0]
+    elseif qtag == "0_1_0"
         return [0.0, 1.0, 0.0]
+    elseif qtag in ("1_0_0", "Gamma_equiv", "gamma_equiv")
+        return [1.0, 0.0, 0.0]
     elseif qtag == "0p33_0p33_0"
         return [1/3, 1/3, 0.0]
     elseif qtag == "0p5_0_0"
         return [0.5, 0.0, 0.0]
     else
         error("Unknown qtag $qtag")
+    end
+end
+
+function sv_qtag_label(qtag::AbstractString)
+    if qtag in ("0_0_0", "0_1_0", "1_0_0", "Gamma", "gamma", "Γ", "Gamma_equiv", "gamma_equiv")
+        return "Γ"
+    elseif qtag == "0p33_0p33_0"
+        return "K"
+    elseif qtag == "0p5_0_0"
+        return "M"
+    else
+        return String(qtag)
     end
 end
 
@@ -1908,7 +1926,7 @@ function sv_q_path_from_tags(qtags::Vector{String}; n_per_segment::Integer=41)
         seglen = norm(q1 .- q0)
         if iseg == 1
             push!(tick_positions, xpos)
-            push!(tick_labels, qtags[iseg])
+            push!(tick_labels, sv_qtag_label(qtags[iseg]))
         end
         for j in 1:n_per_segment
             if iseg > 1 && j == 1
@@ -1921,7 +1939,7 @@ function sv_q_path_from_tags(qtags::Vector{String}; n_per_segment::Integer=41)
         end
         xpos += seglen
         push!(tick_positions, xpos)
-        push!(tick_labels, qtags[iseg+1])
+        push!(tick_labels, sv_qtag_label(qtags[iseg+1]))
     end
 
     return (; qs, x, tick_positions, tick_labels)
@@ -2005,6 +2023,416 @@ function sv_kpm_2d_neutron_scale(params, controls::Dict)
     end
 end
 
+
+# -----------------------------------------------------------------------------
+# Sunny KPM 2D data-vs-model comparison helpers
+# -----------------------------------------------------------------------------
+
+struct SVScan2DCompare
+    file::String
+    header::String
+    xlabel::String
+    x::Vector{Float64}
+    e::Vector{Float64}
+    z::Matrix{Float64}  # size = (length(x), length(e))
+end
+
+function sv_header_line_2d(file::AbstractString)
+    open(file, "r") do io
+        return strip(readline(io))
+    end
+end
+
+function sv_path_label_from_header_2d(header::AbstractString)
+    m = match(r"Error\s+(.+?)\s+DeltaE", header)
+    return m === nothing ? "Path coordinate (rlu)" : "Path coordinate " * strip(m.captures[1]) * " (rlu)"
+end
+
+function sv_plot_2d_controls(repo_root::AbstractString)
+    path = joinpath(repo_root, "configs", "plot_2d_controls.toml")
+    return isfile(path) ? load_toml_config(path) : Dict{String,Any}()
+end
+
+function sv_neutron_2d_dir(repo_root::AbstractString, controls::Dict)
+    # Prefer a Sunny-specific path if present, otherwise reuse the existing
+    # plot_2d_controls.toml path so there is only one source for the experimental
+    # 2D data location.
+    if haskey(controls, "paths") && haskey(controls["paths"], "neutron_2d_dir")
+        return sv_repo_path(repo_root, String(controls["paths"]["neutron_2d_dir"]))
+    end
+    p2 = sv_plot_2d_controls(repo_root)
+    if haskey(p2, "data") && haskey(p2["data"], "neutron_2d_subdir")
+        return sv_repo_path(repo_root, String(p2["data"]["neutron_2d_subdir"]))
+    end
+    return joinpath(repo_root, "data", "neutron", "CNCS_2d_scans")
+end
+
+function sv_find_scan_file_2d(repo_root::AbstractString, controls::Dict; field_T::Real, leg::Integer=1)
+    k2 = sv_kpm_2d_controls(controls)
+    data_dir = sv_neutron_2d_dir(repo_root, controls)
+    ei_tag = String(get(k2, "ei_tag", "4p65"))
+    temp_tag = String(get(k2, "temperature_tag", "0p07K"))
+    ft = round(Int, Float64(field_T))
+    pattern = Regex("^yzgo_$(ei_tag)meV_$(temp_tag)_$(ft)T_2d_leg$(leg)_SYM\\.dat\$")
+    files = sort(filter(f -> occursin(pattern, basename(f)), readdir(data_dir; join=true)))
+    if isempty(files)
+        return nothing
+    elseif length(files) > 1
+        @warn "Multiple 2D files matched; using the first" field_T leg files
+        return files[1]
+    else
+        return files[1]
+    end
+end
+
+function sv_read_scan2d_compare(file::AbstractString; mask_zero::Bool=false)
+    header = sv_header_line_2d(file)
+    data = readdlm(file, Float64; comments=true, comment_char='#')
+    size(data, 2) >= 4 || error("Expected at least 4 numeric columns in $(file), got $(size(data, 2)).")
+
+    intensity = vec(data[:, 1])
+    xcol = vec(data[:, 3])
+    ecol = vec(data[:, 4])
+    xs = sort(collect(unique(xcol)))
+    es = sort(collect(unique(ecol)))
+    xindex = Dict(v => i for (i, v) in enumerate(xs))
+    eindex = Dict(v => i for (i, v) in enumerate(es))
+    z = fill(NaN, length(xs), length(es))
+    for r in axes(data, 1)
+        val = Float64(intensity[r])
+        if mask_zero && iszero(val)
+            val = NaN
+        end
+        z[xindex[xcol[r]], eindex[ecol[r]]] = val
+    end
+    return SVScan2DCompare(String(file), header, sv_path_label_from_header_2d(header), xs, es, z)
+end
+
+function sv_load_2d_scans_for_kpm(repo_root::AbstractString, controls::Dict; fields_T::Vector{Float64}, leg::Integer=1)
+    scans = Dict{Float64,SVScan2DCompare}()
+    for B in fields_T
+        file = sv_find_scan_file_2d(repo_root, controls; field_T=B, leg=leg)
+        if file === nothing
+            @warn "Missing requested 2D scan" field_T=B leg data_dir=sv_neutron_2d_dir(repo_root, controls)
+            continue
+        end
+        scans[B] = sv_read_scan2d_compare(file; mask_zero=get(sv_kpm_2d_controls(controls), "mask_zero_intensity", false))
+    end
+    return scans
+end
+
+function sv_kpm_2d_oldpath_qs_from_x(x::AbstractVector{<:Real}; leg::Integer=1)
+    # Matches the old analytical 2D comparison convention for leg 1:
+    #   Q(u) = u*[1,-1/2,0] + 1/2*[0,1,0]
+    #        = (u, 1/2 - u/2, 0)
+    # so u = -1/3, 0, 1/3, 1 correspond to K1, M1, K, Gamma1.
+    # Leg 2 is left as a simple placeholder for future extension.
+    qs = Vector{Vector{Float64}}()
+    for u0 in x
+        u = Float64(u0)
+        if leg == 1
+            push!(qs, [u, 0.5 - 0.5*u, 0.0])
+        else
+            error("sv_kpm_2d_oldpath_qs_from_x currently implements leg=1 only")
+        end
+    end
+    return qs
+end
+
+function sv_finite_values_2d(z)
+    vals = Float64[]
+    for v in z
+        isfinite(v) && push!(vals, Float64(v))
+    end
+    return vals
+end
+
+function sv_quantile_sorted(vals::Vector{Float64}, q::Real)
+    isempty(vals) && return NaN
+    xs = sort(vals)
+    n = length(xs)
+    n == 1 && return xs[1]
+    t = clamp(Float64(q), 0.0, 1.0) * (n - 1) + 1
+    i = floor(Int, t)
+    j = ceil(Int, t)
+    i == j && return xs[i]
+    return xs[i] + (t - i) * (xs[j] - xs[i])
+end
+
+function sv_robust_colorrange_2d(arrays; high_quantile::Real=0.995, low_quantile::Real=0.01, force_lo_zero::Bool=true)
+    vals = Float64[]
+    for z in arrays
+        append!(vals, sv_finite_values_2d(z))
+    end
+    if isempty(vals)
+        return (0.0, 1.0)
+    end
+    lo = force_lo_zero ? 0.0 : sv_quantile_sorted(vals, low_quantile)
+    hi = sv_quantile_sorted(vals, high_quantile)
+    if !isfinite(lo) || !isfinite(hi) || hi <= lo
+        lo = force_lo_zero ? 0.0 : minimum(vals)
+        hi = maximum(vals)
+    end
+    hi <= lo && (hi = lo + 1.0)
+    return (lo, hi)
+end
+
+function sv_data_colorrange_2d(scans; emin::Real=0.25, emax::Real=Inf, high_quantile::Real=0.95)
+    vals = Float64[]
+    for s in scans
+        for (ie, E) in enumerate(s.e)
+            if Float64(emin) <= E <= Float64(emax)
+                for ix in eachindex(s.x)
+                    v = s.z[ix, ie]
+                    isfinite(v) && push!(vals, Float64(v))
+                end
+            end
+        end
+    end
+    if isempty(vals)
+        for s in scans
+            append!(vals, sv_finite_values_2d(s.z))
+        end
+    end
+    return sv_robust_colorrange_2d([reshape(vals, length(vals), 1)]; high_quantile=high_quantile)
+end
+
+function sv_interp1_linear(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}, xq::Real)
+    xx = Float64.(x)
+    yy = Float64.(y)
+    q = Float64(xq)
+    if q < first(xx) || q > last(xx)
+        return NaN
+    end
+    i = searchsortedlast(xx, q)
+    if i <= 0
+        return yy[1]
+    elseif i >= length(xx)
+        return yy[end]
+    else
+        x0, x1 = xx[i], xx[i+1]
+        y0, y1 = yy[i], yy[i+1]
+        x1 == x0 && return y0
+        t = (q - x0) / (x1 - x0)
+        return (1 - t) * y0 + t * y1
+    end
+end
+
+function sv_model_to_scan_energy_grid(model_E::AbstractVector{<:Real}, model_I_E_by_x::AbstractMatrix, scan::SVScan2DCompare)
+    nE, nx = size(model_I_E_by_x)
+    nx == length(scan.x) || error("Model q grid length $(nx) does not match scan x length $(length(scan.x))")
+    out = fill(NaN, length(scan.x), length(scan.e))
+    for ix in eachindex(scan.x)
+        col = view(model_I_E_by_x, :, ix)
+        for (ie, E) in enumerate(scan.e)
+            out[ix, ie] = sv_interp1_linear(model_E, col, E)
+        end
+    end
+    return out
+end
+
+function sv_least_squares_scale_2d(scans, model_on_scan_grid; emin::Real=0.25, emax::Real=3.2, nonnegative::Bool=true, fallback::Real=1.0)
+    num = 0.0
+    den = 0.0
+    for (B, scan) in scans
+        haskey(model_on_scan_grid, B) || continue
+        m = model_on_scan_grid[B]
+        for ix in eachindex(scan.x), ie in eachindex(scan.e)
+            E = scan.e[ie]
+            if Float64(emin) <= E <= Float64(emax)
+                d = scan.z[ix, ie]
+                y = m[ix, ie]
+                if isfinite(d) && isfinite(y)
+                    num += d * y
+                    den += y * y
+                end
+            end
+        end
+    end
+    if !(isfinite(den) && den > 0)
+        @warn "Degenerate 2D least-squares scale; using fallback" fallback den
+        return Float64(fallback)
+    end
+    s = num / den
+    nonnegative && (s = max(0.0, s))
+    isfinite(s) || return Float64(fallback)
+    return Float64(s)
+end
+
+function sv_kpm_2d_plot_guides(k2)
+    return Float64.(get(k2, "guide_xs", [-1/3, 0.0, 1/3, 2/3, 1.0]))
+end
+
+function sv_kpm_2d_plot_ticks(k2)
+    xs = Float64.(get(k2, "xtick_positions", [-1/3, 0.0, 1/3, 1.0]))
+    labs = String.(get(k2, "xtick_labels", ["K₁", "M₁", "K", "Γ₁"]))
+    return (xs, labs)
+end
+
+function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls=sv_load_controls(repo_root))
+    (; params, path) = sv_load_params(repo_root, controls)
+    print_canonical_model_parameters(params)
+    @info "Sunny validation: KPM 2D data-vs-model comparison" sunny_version=sv_try_pkgversion(Sunny) params_path=path
+
+    out_table_dir = sv_repo_path(repo_root, controls["paths"]["table_subdir"])
+    out_fig_dir = sv_repo_path(repo_root, controls["paths"]["figure_subdir"])
+    mkpath(out_table_dir); mkpath(out_fig_dir)
+
+    k2 = sv_kpm_2d_controls(controls)
+    fields = haskey(k2, "fields_T") ? Float64.(k2["fields_T"]) : Float64.(controls["common"]["fields_T"])
+    leg = Int(get(k2, "leg", 1))
+    scans = sv_load_2d_scans_for_kpm(repo_root, controls; fields_T=fields, leg=leg)
+    isempty(scans) && error("No experimental 2D scans loaded for Sunny KPM 2D comparison")
+
+    flat_to_dispersive_fraction = sv_second_kernel_weight(params, controls)
+    flat_weight = sv_flat_neutron_weight(params, controls)
+    reference_scale = sv_neutron_scale(params, controls)
+    scale_mode = Symbol(get(k2, "neutron_scale_mode", "global_least_squares"))
+    sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
+    kpm_sizectl = sv_system_size_controls(controls, "kpm")
+
+    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets())
+
+    raw_models = Dict{Float64,Any}()
+    model_on_scan_grid = Dict{Float64,Matrix{Float64}}()
+    for B in fields
+        haskey(scans, B) || continue
+        scan = scans[B]
+        qs = sv_kpm_2d_oldpath_qs_from_x(scan.x; leg=leg)
+        @info "Computing Sunny KPM 2D map on experimental path" field_T=B leg n_q=length(qs)
+        disp = sv_kpm_component_spectra_for_qs(params, controls; component=:dispersive, field_T=B, qs=qs)
+        flat = sv_kpm_component_spectra_for_qs(params, controls; component=:flat, field_T=B, qs=qs)
+        Itotal_unscaled = disp.intensity .+ flat_weight .* flat.intensity
+        raw_models[B] = (; disp, flat, Itotal_unscaled, qs)
+        model_on_scan_grid[B] = sv_model_to_scan_energy_grid(disp.energy_meV, Itotal_unscaled, scan)
+    end
+
+    scale_by_field = Dict{Float64,Float64}()
+    if scale_mode == :best_fit
+        for B in keys(raw_models); scale_by_field[B] = reference_scale; end
+    elseif scale_mode == :manual
+        s = Float64(get(k2, "manual_neutron_scale", reference_scale))
+        for B in keys(raw_models); scale_by_field[B] = s; end
+    elseif scale_mode == :global_least_squares
+        s = sv_least_squares_scale_2d(scans, model_on_scan_grid;
+            emin=Float64(get(k2, "scale_energy_min_meV", 0.25)),
+            emax=Float64(get(k2, "scale_energy_max_meV", 3.2)),
+            fallback=reference_scale,
+        )
+        for B in keys(raw_models); scale_by_field[B] = s; end
+    elseif scale_mode == :panel_least_squares
+        for B in keys(raw_models)
+            scale_by_field[B] = sv_least_squares_scale_2d(Dict(B => scans[B]), Dict(B => model_on_scan_grid[B]);
+                emin=Float64(get(k2, "scale_energy_min_meV", 0.25)),
+                emax=Float64(get(k2, "scale_energy_max_meV", 3.2)),
+                fallback=reference_scale,
+            )
+        end
+    else
+        error("Unknown [kpm_2d].neutron_scale_mode=$scale_mode. Use best_fit, manual, global_least_squares, or panel_least_squares.")
+    end
+
+    # Save one long CSV per field for reproducibility. Model intensities are on
+    # the native Sunny KPM energy grid, while the scaling was computed after
+    # interpolation to the experimental energy grid.
+    csv_paths = Dict{Float64,String}()
+    for B in sort(collect(keys(raw_models)))
+        m = raw_models[B]
+        scan = scans[B]
+        scale = scale_by_field[B]
+        nE = length(m.disp.energy_meV)
+        nq = length(scan.x)
+        rows = nE * nq
+        q_index = Int[]; path_coordinate = Float64[]; qx=Float64[]; qy=Float64[]; qz=Float64[]; energy_col=Float64[]
+        total_scaled=Float64[]; disp_scaled=Float64[]; flat_scaled=Float64[]; total_unscaled=Float64[]; disp_unscaled=Float64[]; flat_unweighted=Float64[]
+        for iq in 1:nq
+            q = m.qs[iq]
+            for iE in 1:nE
+                push!(q_index, iq); push!(path_coordinate, scan.x[iq]); push!(qx, q[1]); push!(qy, q[2]); push!(qz, q[3]); push!(energy_col, m.disp.energy_meV[iE])
+                push!(total_unscaled, m.Itotal_unscaled[iE, iq])
+                push!(disp_unscaled, m.disp.intensity[iE, iq])
+                push!(flat_unweighted, m.flat.intensity[iE, iq])
+                push!(total_scaled, scale * m.Itotal_unscaled[iE, iq])
+                push!(disp_scaled, scale * m.disp.intensity[iE, iq])
+                push!(flat_scaled, scale * flat_weight * m.flat.intensity[iE, iq])
+            end
+        end
+        tag = @sprintf("%gT_leg%d", B, leg)
+        csv_path = joinpath(out_table_dir, "sunny_kpm_2d_data_model_$(tag).csv")
+        sv_write_xy_csv(csv_path,
+            "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,neutron_scale_mode,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy",
+            q_index, path_coordinate, qx, qy, qz, energy_col,
+            total_scaled, disp_scaled, flat_scaled, total_unscaled, disp_unscaled, flat_unweighted,
+            fill(scale, rows), fill(String(scale_mode), rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows),
+        )
+        csv_paths[B] = csv_path
+    end
+
+    # Linear-intensity, 2-row style matching the analytical 2D data/model plot.
+    fields_have = sort(collect(keys(raw_models)))
+    ncols = length(fields_have)
+    fig = Figure(size=(1180, 850), fontsize=16)
+    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K", leg), fontsize=21, font=:bold, tellwidth=false)
+
+    energy_ylim = Float64.(get(k2, "energy_ylim_meV", [0.20, 3.20]))
+    xlim = haskey(k2, "xlim") ? Float64.(k2["xlim"]) : nothing
+    data_cr = sv_data_colorrange_2d([scans[B] for B in fields_have];
+        emin=Float64(get(k2, "data_color_energy_min_meV", 0.25)),
+        emax=Float64(get(k2, "data_color_energy_max_meV", Inf)),
+        high_quantile=Float64(get(k2, "data_clip_high_quantile", 0.95)),
+    )
+    model_arrays = [permutedims(scale_by_field[B] .* raw_models[B].Itotal_unscaled) for B in fields_have]
+    model_cr = sv_robust_colorrange_2d(model_arrays; high_quantile=Float64(get(k2, "model_clip_high_quantile", 0.995)))
+    cmap = Symbol(get(k2, "colormap", "viridis"))
+    guides = sv_kpm_2d_plot_guides(k2)
+    xticks = sv_kpm_2d_plot_ticks(k2)
+
+    data_hm = nothing
+    model_hm = nothing
+    for (icol, B) in enumerate(fields_have)
+        scan = scans[B]
+        m = raw_models[B]
+        zmodel = scale_by_field[B] .* m.Itotal_unscaled
+
+        axd = Axis(fig[1, icol], title=@sprintf("%g T", B), ylabel=icol == 1 ? "Data\nΔE (meV)" : "", xlabel="")
+        data_hm = heatmap!(axd, scan.x, scan.e, scan.z; colormap=cmap, colorrange=data_cr, nan_color=:lightgray)
+        xlim === nothing ? xlims!(axd, minimum(scan.x), maximum(scan.x)) : xlims!(axd, xlim[1], xlim[2])
+        length(energy_ylim) == 2 && ylims!(axd, energy_ylim[1], energy_ylim[2])
+        vlines!(axd, guides; color=(:white, 0.45), linewidth=1)
+        axd.xticks = xticks
+
+        axm = Axis(fig[2, icol], title=@sprintf("scale = %.4g", scale_by_field[B]), ylabel=icol == 1 ? "Sunny KPM\nΔE (meV)" : "", xlabel=scan.xlabel)
+        model_hm = heatmap!(axm, scan.x, m.disp.energy_meV, permutedims(zmodel); colormap=cmap, colorrange=model_cr, nan_color=:lightgray)
+        xlim === nothing ? xlims!(axm, minimum(scan.x), maximum(scan.x)) : xlims!(axm, xlim[1], xlim[2])
+        length(energy_ylim) == 2 && ylims!(axm, energy_ylim[1], energy_ylim[2])
+        vlines!(axm, guides; color=(:white, 0.45), linewidth=1)
+        axm.xticks = xticks
+    end
+    data_hm !== nothing && Colorbar(fig[1, ncols+1], data_hm; label="Data intensity")
+    model_hm !== nothing && Colorbar(fig[2, ncols+1], model_hm; label="Scaled Sunny KPM intensity")
+    colgap!(fig.layout, 10)
+    rowgap!(fig.layout, 10)
+
+    fig_path = joinpath(out_fig_dir, @sprintf("sunny_kpm_2d_data_vs_model_leg%d.png", leg))
+    save(fig_path, fig)
+    if get(k2, "save_pdf", false)
+        try
+            save(joinpath(out_fig_dir, @sprintf("sunny_kpm_2d_data_vs_model_leg%d.pdf", leg)), fig)
+        catch err
+            @warn "Could not save Sunny KPM 2D PDF" exception=(err, catch_backtrace())
+        end
+    end
+
+    @info "Saved Sunny KPM 2D data/model comparison" fig_path scale_mode scale_by_field csv_paths
+    println()
+    println("Sunny KPM 2D data-vs-model comparison completed")
+    println("  figure: ", fig_path)
+    for B in fields_have
+        println(@sprintf("  %g T scale = %.6g; CSV = %s", B, scale_by_field[B], csv_paths[B]))
+    end
+    return (; fig_path, csv_paths, scans, raw_models, scale_by_field, fields_T=fields_have)
+end
+
 function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_controls(repo_root))
     (; params, path) = sv_load_params(repo_root, controls)
     print_canonical_model_parameters(params)
@@ -2016,7 +2444,8 @@ function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_cont
 
     k2 = sv_kpm_2d_controls(controls)
     B = Float64(get(k2, "field_T", first(Float64.(controls["common"]["fields_T"]))))
-    qtags = String.(get(k2, "qtags", controls["kpm"]["qtags"]))
+    default_2d_qtags = ["0_0_0", "0p33_0p33_0", "0p5_0_0", "1_0_0"]
+    qtags = String.(get(k2, "qtags", default_2d_qtags))
     n_per_segment = Int(get(k2, "n_per_segment", 41))
     pathinfo = sv_q_path_from_tags(qtags; n_per_segment=n_per_segment)
 
@@ -2109,6 +2538,12 @@ function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_cont
     save(fig_path, fig)
 
     @info "Saved Sunny KPM 2D path map" fig_path csv_path
+    println()
+    println("Sunny KPM 2D path map completed")
+    println("  field_T: ", B)
+    println("  qtags:   ", join(qtags, " -> "))
+    println("  figure:  ", fig_path)
+    println("  CSV:     ", csv_path)
     return (; fig_path, csv_path, field_T=B, qtags, energy_meV=disp.energy_meV, x=pathinfo.x, Itotal_scaled, Idisp_scaled, Iflat_scaled)
 end
 

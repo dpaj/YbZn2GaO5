@@ -13,6 +13,7 @@
 best_fit_parameters_toml = "configs/best_fit_parameters.toml"
 magnetization_csv = "data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv"
 neutron_1d_dir = "data/neutron/CNCS_1d_scans"
+neutron_2d_dir = "data/neutron/CNCS_2d_scans"
 cif_path = "data/cif/ICSD_CollCode138765.cif"
 figure_subdir = "results/figures/sunny_validation"
 table_subdir = "results/feature_tables/sunny_validation"
@@ -100,9 +101,9 @@ moment_sign = -1.0
 # `system_size` is the final inhomogeneous Sunny supercell used for KPM.
 # `dims` is the smaller seed system constructed before repeat_periodically.
 # If `system_size` is present, repeat_factor is derived as system_size ./ dims.
-system_size = [12, 12, 1]
+system_size = [64, 64, 1]
 dims = [3, 3, 1]
-repeat_factor = [4, 4, 1]
+repeat_factor = [12, 12, 1]
 include_exchange_disorder = true
 include_gzz_disorder = true
 maxiters = 1000
@@ -198,22 +199,39 @@ include_gperp_ratio_intensity_weight = true
 
 plot_ylim = [-0.0005, 0.0030]
 
-
 [kpm_2d]
-# Model-only Sunny 2D path map.  This uses the same canonical best-fit
-# parameters and the same KPM finite-size/extrinsic controls as [kpm].
-field_T = 9.0
-qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
-n_per_segment = 41
+# Experimental 2D CNCS comparison using the same visual convention as
+# scripts/plot_2d_data_vs_model.jl:
+#   top row = data, bottom row = Sunny KPM model, columns = fields.
+fields_T = [9.0, 14.0]
+leg = 1
+ei_tag = "4p65"
+temperature_tag = "0p07K"
 
-# Because this is a model-only map, least-squares / max-match scaling cannot be
-# determined unless experimental 2D data are added later.  Use "best_fit" as a
-# reference scale or "manual" for a visual diagnostic.
-neutron_scale_mode = "best_fit"
-manual_neutron_scale = 1.0
+# Uses the old analytical 2D path convention for leg 1:
+# Q(u) = (u, 1/2 - u/2, 0), u = -1/3 -> 1.
+path_mode = "old_analytical_leg1"
 
-# linear or log10.  log10 can be useful when the KPM map has a broad dynamic range.
+# For data-vs-model display, use a linear intensity scale.  The color range is
+# robustly clipped below; no log10 transform is applied.
 z_mode = "linear"
-log10_floor = 1e-12
-energy_ylim_meV = [0.0, 4.0]
-output_tag = "9T"
+colormap = "viridis"
+energy_ylim_meV = [0.20, 3.20]
+xtick_positions = [-0.3333333333333333, 0.0, 0.3333333333333333, 1.0]
+xtick_labels = ["K₁", "M₁", "K", "Γ₁"]
+guide_xs = [-0.3333333333333333, 0.0, 0.3333333333333333, 0.6666666666666666, 1.0]
+
+# Match the analytical 2D plotting script's spirit: one display scale shared
+# across both fields. Use "best_fit" or "manual" for fixed-scale diagnostics.
+neutron_scale_mode = "global_least_squares"
+manual_neutron_scale = 1.0
+scale_energy_min_meV = 0.25
+scale_energy_max_meV = 3.20
+
+data_color_energy_min_meV = 0.25
+data_color_energy_max_meV = 99.0
+data_clip_high_quantile = 0.95
+model_clip_high_quantile = 0.995
+mask_zero_intensity = false
+save_pdf = false
+
