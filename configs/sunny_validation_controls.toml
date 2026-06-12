@@ -24,6 +24,12 @@ fields_T = [9.0, 14.0]
 spin_S = 0.5
 seed = 20260611
 
+# Sunny neutron-intensity gauge.  For H || c, ssf_perp needs nonzero transverse
+# moment-tensor components; otherwise the KPM neutron intensity can vanish.
+# This is not the fitted physical gperp.  The effective flat/dispersive
+# transverse intensity ratio remains handled externally by gperp_ratio.
+sunny_transverse_gxy = 1.0
+
 # Effective triangular-lattice geometry used by the preliminary Sunny builders.
 # The analytical comparison uses reciprocal coordinates more than absolute lengths,
 # so these lengths mostly set plotting/convention scales for Sunny.
@@ -31,8 +37,17 @@ lattice_a_angstrom = 3.4
 lattice_c_angstrom = 10.0
 
 [weights]
-# For the current shared-fraction co-fit, the same relative second-kernel weight
-# is used as the default total-model mixing coefficient.
+# Best-fit flat / dispersive S=1/2 fraction.
+#
+# In configs/best_fit_parameters.toml this is stored as:
+#
+#   [neutron_extrinsic]
+#   second_kernel_relative_intensity = 0.1579822309
+#
+# Despite the historical name, in the shared-fraction model this is the fitted
+# relative population/weight of the nondispersive flat S=1/2 component compared
+# with the dispersive component.  The Sunny scripts use it when the flag below
+# is true; otherwise they use the manual diagnostic value.
 use_second_kernel_relative_intensity_from_best_fit = true
 manual_second_kernel_relative_intensity = 0.1579822309
 
@@ -42,38 +57,17 @@ Bmax_T = 7.0
 nB = 141
 temperature_K = 0.42
 
-# Scale convention for comparison to experiment.
-#
-# By default, the Sunny validation uses the analytical co-fit scale stored in:
-#
-#   [magnetization_extrinsic]
-#   magnetization_global_scale = ...
-#
-# in configs/best_fit_parameters.toml.  This scale multiplies the full unscaled
-# Sunny comparison curve, including chi_vv*B, matching the analytical co-fit CSV
-# convention.
+# Analytical co-fit scale convention.  The default uses the best-fit
+# magnetization_global_scale from configs/best_fit_parameters.toml and applies
+# it to the full unscaled magnetization comparison curve, including chi_vv B.
 use_magnetization_global_scale_from_best_fit = true
 manual_magnetization_global_scale = 1.0
-
-# Magnetic component mixing convention.  With the default true value, the
-# relative second-kernel weight r2 is treated as a mixture ratio:
-#
-#   Mmag = (Mdisp + r2*Mflat)/(1+r2)
-#
-# Set false only as a diagnostic to reproduce the older unnormalized behavior.
 normalize_second_kernel_weight = true
-
-# Include the Van Vleck-like linear contribution from best_fit_parameters.toml.
 include_chi_vv = true
 
-# Mean-field bridge moment sign.  The analytic/mean-field convention should
-# usually already be positive for positive field.
-moment_sign = 1.0
-
-# Always write diagnostic best vertical scale factors to the CSV.  If true, the
-# plots also show a diagnostic-scaled total curve without changing the primary
-# analytical-scale curve.
-plot_diagnostic_scaled_curve = true
+# Diagnostic-only vertical scaling can be enabled if desired, but should not be
+# used for the primary Sunny validation curve.
+fit_vertical_scale = false
 
 [meanfield]
 # Mean-field bridge model.  This is a numerical version of the current analytical
@@ -84,22 +78,29 @@ normal_quad_n = 301
 normal_quad_zmax = 5.0
 
 [largecell]
-# Sunny minimize_energy! validation.  Keep this intentionally cheap at first.
-# Increase dims/repeat_factor only after the initial script runs.
+# Sunny minimize_energy! validation.  These are extrinsic finite-size calculator
+# controls, not fitted microscopic parameters.
+#
+# `system_size` is the final finite Sunny supercell used for the calculation.
+# `dims` is the seed Sunny system size.  If `system_size` is present, the code
+# derives repeat_factor = system_size ./ dims and checks consistency.
+system_size = [4, 4, 1]
 dims = [4, 4, 1]
 repeat_factor = [1, 1, 1]
 include_exchange_disorder = true
 include_gzz_disorder = true
 maxiters = 1000
 randomize_each_field = false
-
-# Sunny may return spin/moment directions with the opposite sign convention from
-# the experimental M(B) plot.  The default -1 flips the large-cell output so that
-# positive field gives positive plotted magnetization.
 moment_sign = -1.0
 
 [kpm]
-# Sunny SpinWaveTheoryKPM validation.  This is the roughest first-pass script.
+# Sunny SpinWaveTheoryKPM validation.  These are extrinsic finite-size calculator
+# controls, not fitted microscopic parameters.
+#
+# `system_size` is the final inhomogeneous Sunny supercell used for KPM.
+# `dims` is the smaller seed system constructed before repeat_periodically.
+# If `system_size` is present, repeat_factor is derived as system_size ./ dims.
+system_size = [24, 24, 1]
 dims = [3, 3, 1]
 repeat_factor = [4, 4, 1]
 include_exchange_disorder = true
@@ -113,3 +114,86 @@ n_energy = 161
 
 # Experimental 1D q cuts to validate first.  The exact 2D path can be added later.
 qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+
+# Match the first Sunny neutron validation to the analytical co-fit target.
+Ei_meV = 4.65
+temperature_K = 0.07
+
+# Data-file column convention for CNCS_1d_scans files:
+#   column 1 = intensity
+#   column 2 = error
+#   column 3 = energy transfer
+# These are retained only for nonstandard diagnostics; the default loader uses
+# the analytical co-fit convention directly.
+use_analytical_1d_column_convention = true
+intensity_column = 1
+error_column = 2
+energy_column = 3
+
+# Experimental comparison convention.
+# `tail_bgsub` / `analytical_bgsub` now ports the same spline/minimum-field
+# background construction used by the analytical co-fit:
+#   - take the minimum over 0, 9, and 14 T in the low-energy and high-energy tails,
+#   - add the fitted 0 T structured residual under K/M background windows,
+#   - interpolate the resulting background onto the common energy grid.
+data_mode = "tail_bgsub"
+background_fields_T = [0.0, 9.0, 14.0]
+min_bg_low_window_meV = [0.0, 0.75]
+min_bg_high_threshold_meV = 2.5
+structured_fit_window_meV = [1.0, 3.0]
+background_interp_kind = "pchip"
+background_smooth_sigma_meV = 0.0
+zeroT_baseline_model = "power_tail"
+zeroT_baseline_energy_offset_meV = 0.15
+zeroT_baseline_ridge_lambda = 0.0
+zeroT_baseline_include_linear_tilt = false
+zeroT_baseline_positive_tail = true
+clip_negative_structured_residuals = false
+# Optional diagnostic fallback; not used when data_mode = "tail_bgsub".
+tail_background_windows_meV = [[0.0, 0.75], [2.5, 4.0]]
+tail_background_statistic = "median"
+
+# Histogram/interpolate Sunny spectra onto the experimental energy grid.
+histogram_mode = "bin_average"
+
+# Intensity convention for Sunny-vs-experiment neutron comparison.
+#
+# The analytical co-fit neutron_global_scale is useful as a reference, but Sunny
+# intensities can have a different absolute normalization.  Choose one of:
+#
+#   neutron_scale_mode = "best_fit"
+#       use neutron_global_scale from configs/best_fit_parameters.toml
+#
+#   neutron_scale_mode = "manual"
+#       use manual_neutron_global_scale below
+#
+#   neutron_scale_mode = "least_squares"
+#       fit one nonnegative intensity scale to experiment
+#
+#   neutron_scale_mode = "max_match"
+#       scale Sunny so its maximum matches the experimental maximum
+#
+# `neutron_scale_scope = "global"` fits/uses one scale across all fields and q cuts.
+# `neutron_scale_scope = "per_cut"` fits a separate visual diagnostic scale for each cut.
+neutron_scale_mode = "least_squares"
+neutron_scale_scope = "global"
+use_neutron_global_scale_from_best_fit = true
+manual_neutron_global_scale = 1.0
+neutron_scale_fit_window_meV = [0.5, 3.0]
+neutron_scale_use_uncertainties = true
+neutron_scale_nonnegative = true
+neutron_scale_positive_experiment_only = false
+neutron_scale_positive_model_only = false
+
+# Guardrails: if the unscaled Sunny model is nearly zero, least-squares or
+# max-matching can produce an absurd scale. In that case, fall back to the
+# reference/manual scale and treat the result as a physics/path/intensity issue.
+neutron_scale_min_model_power = 1e-30
+neutron_scale_min_model_peak = 1e-15
+neutron_scale_max_abs = 1e8
+
+# total = neutron_scale * (Sunny_disp + flat_weight * Sunny_flat)
+# flat_weight = r2 * gperp_ratio^2 by default.
+include_gperp_ratio_intensity_weight = true
+
+plot_ylim = [-0.0005, 0.0030]

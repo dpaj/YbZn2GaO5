@@ -67,6 +67,52 @@ function sv_units()
     return Units(:meV, :angstrom)
 end
 
+function sv_system_size_controls(controls::Dict, section::AbstractString)
+    sec = controls[section]
+
+    if haskey(sec, "dims")
+        dims = sv_dims_tuple(sec["dims"])
+    elseif haskey(sec, "system_size")
+        dims = sv_dims_tuple(sec["system_size"])
+    else
+        error("[$section] must define either dims or system_size")
+    end
+
+    if haskey(sec, "system_size")
+        system_size = sv_dims_tuple(sec["system_size"])
+        for i in 1:3
+            system_size[i] >= dims[i] || error("[$section] system_size must be >= dims component-wise; got system_size=$system_size dims=$dims")
+            system_size[i] % dims[i] == 0 || error("[$section] system_size must be an integer multiple of dims; got system_size=$system_size dims=$dims")
+        end
+        repeat_factor = (system_size[1] ÷ dims[1], system_size[2] ÷ dims[2], system_size[3] ÷ dims[3])
+
+        if haskey(sec, "repeat_factor")
+            configured_repeat = sv_dims_tuple(sec["repeat_factor"])
+            implied_system_size = (dims[1] * configured_repeat[1], dims[2] * configured_repeat[2], dims[3] * configured_repeat[3])
+            if implied_system_size != system_size
+                @warn "Ignoring [$section].repeat_factor because [$section].system_size is present and inconsistent" section dims system_size configured_repeat implied_system_size repeat_factor
+            end
+        end
+    else
+        repeat_factor = haskey(sec, "repeat_factor") ? sv_dims_tuple(sec["repeat_factor"]) : (1, 1, 1)
+        system_size = (dims[1] * repeat_factor[1], dims[2] * repeat_factor[2], dims[3] * repeat_factor[3])
+    end
+
+    return (; dims, repeat_factor, system_size)
+end
+
+function sv_sunny_transverse_gxy(controls::Dict)
+    # Sunny's ssf_perp measure uses the magnetic moment tensor.  For H || c,
+    # inelastic neutron intensity comes from transverse fluctuations, so setting
+    # gxx = gyy = 0 can make the KPM spectrum vanish numerically.
+    #
+    # This is a Sunny neutron-intensity gauge for validation, not a fitted
+    # physical gperp.  The effective flat/dispersive transverse intensity ratio
+    # remains handled externally through gperp_ratio in sv_flat_neutron_weight.
+    common = get(controls, "common", Dict{String,Any}())
+    return Float64(get(common, "sunny_transverse_gxy", 1.0))
+end
+
 function sv_try_pkgversion(mod)
     try
         return string(pkgversion(mod))
@@ -238,6 +284,7 @@ function sv_write_magnetization_csv(path::AbstractString, Bs, comp, diag)
             "M_flat_raw_uB_per_site",
             "M_exp_interp_uB_per_Yb",
             "second_kernel_weight",
+            "flat_to_dispersive_fraction",
             "magnetization_global_scale",
             "diagnostic_scale_unscaled_combo",
             "diagnostic_scale_primary_total",
@@ -263,6 +310,7 @@ function sv_write_magnetization_csv(path::AbstractString, Bs, comp, diag)
                 comp.M_flat_raw_uB_per_site[i],
                 diag.M_exp_interp_uB_per_Yb[i],
                 comp.r2,
+                comp.r2,
                 comp.magnetization_scale,
                 diag.diagnostic_scale_unscaled_combo,
                 diag.diagnostic_scale_primary_total,
@@ -276,15 +324,35 @@ function sv_write_magnetization_csv(path::AbstractString, Bs, comp, diag)
     return path
 end
 
+function sv_csv_cell(x)
+    if x isa Real
+        return isfinite(Float64(x)) ? @sprintf("%.10g", Float64(x)) : string(x)
+    elseif x === missing || x === nothing
+        return ""
+    else
+        s = string(x)
+        # Quote strings only when CSV syntax requires it.
+        if findfirst(==(','), s) !== nothing || findfirst(==(Char(34)), s) !== nothing || findfirst(==(Char(10)), s) !== nothing || findfirst(==(Char(13)), s) !== nothing
+            return "\"" * replace(s, "\"" => "\"\"") * "\""
+        else
+            return s
+        end
+    end
+end
+
 function sv_write_xy_csv(path::AbstractString, header::AbstractString, cols...)
     mkpath(dirname(path))
+    isempty(cols) && error("sv_write_xy_csv requires at least one column")
     n = length(cols[1])
+    for (j, c) in enumerate(cols)
+        length(c) == n || error("CSV column $j has length $(length(c)); expected $n")
+    end
     open(path, "w") do io
         println(io, header)
         for i in 1:n
             for (j, c) in enumerate(cols)
                 j > 1 && print(io, ',')
-                print(io, @sprintf("%.10g", Float64(c[i])))
+                print(io, sv_csv_cell(c[i]))
             end
             println(io)
         end
@@ -461,13 +529,13 @@ function sv_effective_triangle_crystal(controls::Dict)
     return Crystal(latvecs, [[0.0, 0.0, 0.0]], 1; types=["Yb"])
 end
 
-function sv_set_gzz_all_sites!(sys, gzz::Real)
+function sv_set_gzz_all_sites!(sys, gzz::Real; gxy::Real=1.0)
     for site in eachsite(sys)
         G = sys.gs[site]
         Gm = Matrix(G)
         Gm .= 0.0
-        Gm[1,1] = 0.0
-        Gm[2,2] = 0.0
+        Gm[1,1] = Float64(gxy)
+        Gm[2,2] = Float64(gxy)
         Gm[3,3] = Float64(gzz)
         sys.gs[site] = SMatrix{3,3,Float64,9}(Gm)
     end
@@ -478,10 +546,11 @@ function sv_build_effective_sunny_system(params, controls::Dict; component::Symb
     units = sv_units()
     cryst = sv_effective_triangle_crystal(controls)
     g0 = component == :flat ? params.gzz2 : params.gzz
-    sys = System(cryst, [1 => Moment(s=Float64(controls["common"]["spin_S"]), g=Float64(g0))], :dipole; dims=dims, seed=Int(controls["common"]["seed"]))
-    # Force Ising-like g convention for H || c validation.  This may need tuning
-    # if Sunny's current Moment constructor already created an acceptable matrix.
-    sv_set_gzz_all_sites!(sys, g0)
+    gxy = sv_sunny_transverse_gxy(controls)
+    # Start from a benign moment tensor and then overwrite every site below.
+    # Keeping gxx = gyy nonzero is essential for ssf_perp neutron intensity.
+    sys = System(cryst, [1 => Moment(s=Float64(controls["common"]["spin_S"]), g=1.0)], :dipole; dims=dims, seed=Int(controls["common"]["seed"]))
+    sv_set_gzz_all_sites!(sys, g0; gxy=gxy)
 
     if component == :dispersive
         # Effective triangular lattice.  These three directions generate the six
@@ -582,8 +651,10 @@ function sv_run_largecell_magnetization(repo_root::AbstractString; controls=sv_l
 
     Bs = sv_field_grid(controls)
     lc = controls["largecell"]
-    dims = sv_dims_tuple(lc["dims"])
-    repeat_factor = sv_dims_tuple(lc["repeat_factor"])
+    sizectl = sv_system_size_controls(controls, "largecell")
+    dims = sizectl.dims
+    repeat_factor = sizectl.repeat_factor
+    @info "Sunny finite-size convention: large-cell" dims repeat_factor system_size=sizectl.system_size
     include_exchange = get(lc, "include_exchange_disorder", true)
     include_gzz = get(lc, "include_gzz_disorder", true)
     maxiters = Int(lc["maxiters"])
@@ -634,6 +705,675 @@ end
 # Preliminary KPM 1D spin-wave validation
 # -----------------------------------------------------------------------------
 
+
+# -----------------------------------------------------------------------------
+# Experimental neutron 1D cuts and histogramming helpers
+# -----------------------------------------------------------------------------
+
+struct SVNeutronCut1D
+    path::String
+    Ei_meV::Float64
+    temperature_K::Float64
+    field_T::Float64
+    qtag::String
+    energy_meV::Vector{Float64}
+    intensity::Vector{Float64}
+    error::Vector{Float64}
+    raw_intensity::Vector{Float64}
+    background::Vector{Float64}
+    background_level::Float64
+    data_mode::Symbol
+end
+
+function sv_parse_filename_number_token(tok::AbstractString)
+    return parse(Float64, replace(tok, "p" => "."))
+end
+
+function sv_parse_neutron_1d_filename(path::AbstractString)
+    fname = basename(path)
+    m = match(r"^yzgo_(\d+(?:p\d+)?)meV_(\d+(?:p\d+)?)K_(\d+(?:p\d+)?)T_Escan_(.+)_SYM\.dat$", fname)
+    m === nothing && error("Filename does not match expected 1D scan pattern: $fname")
+    return (;
+        Ei_meV = sv_parse_filename_number_token(m.captures[1]),
+        temperature_K = sv_parse_filename_number_token(m.captures[2]),
+        field_T = sv_parse_filename_number_token(m.captures[3]),
+        qtag = String(m.captures[4]),
+    )
+end
+
+function sv_read_numeric_dat_matrix(path::AbstractString)
+    rows = Vector{Vector{Float64}}()
+    open(path, "r") do io
+        for line in eachline(io)
+            s = strip(line)
+            isempty(s) && continue
+            startswith(s, "#") && continue
+            parts = split(s)
+            vals = Float64[]
+            good = true
+            for part in parts
+                v = tryparse(Float64, part)
+                if v === nothing
+                    good = false
+                    break
+                end
+                push!(vals, v)
+            end
+            if good && !isempty(vals)
+                push!(rows, vals)
+            end
+        end
+    end
+    isempty(rows) && error("No numeric rows found in neutron data file: $path")
+    ncols = minimum(length.(rows))
+    mat = zeros(Float64, length(rows), ncols)
+    for (i, row) in enumerate(rows)
+        mat[i, :] .= row[1:ncols]
+    end
+    return mat
+end
+
+
+# -----------------------------------------------------------------------------
+# Analytical-cofit-style neutron background subtraction
+# -----------------------------------------------------------------------------
+
+struct SVRawNeutronScan1D
+    path::String
+    Ei_meV::Float64
+    temperature_K::Float64
+    field_T::Float64
+    qtag::String
+    energy_meV::Vector{Float64}
+    intensity::Vector{Float64}
+    error::Vector{Float64}
+    H::Vector{Float64}
+    K::Vector{Float64}
+    L::Vector{Float64}
+end
+
+function sv_load_neutron_raw_scan_1d(path::AbstractString, controls::Dict)
+    meta = sv_parse_neutron_1d_filename(path)
+    mat = sv_read_numeric_dat_matrix(path)
+    kc = controls["kpm"]
+
+    # Match the analytical co-fit loader exactly.
+    #
+    # CNCS 1D scan file columns:
+    #   1 Intensity
+    #   2 Error
+    #   3 DeltaE
+    #   4 [0,K,0]
+    #   5 [0,0,L]
+    #   6 [H,0,0]
+    ncols = size(mat, 2)
+    ncols >= 6 || error("Expected at least 6 columns in $(basename(path)); got $ncols")
+
+    intensity = Float64.(mat[:, 1])
+    error     = Float64.(mat[:, 2])
+    energy    = Float64.(mat[:, 3])
+    K         = Float64.(mat[:, 4])
+    L         = Float64.(mat[:, 5])
+    H         = Float64.(mat[:, 6])
+
+    idx = sortperm(energy)
+    return SVRawNeutronScan1D(
+        String(path),
+        meta.Ei_meV,
+        meta.temperature_K,
+        meta.field_T,
+        meta.qtag,
+        energy[idx],
+        intensity[idx],
+        error[idx],
+        H[idx],
+        K[idx],
+        L[idx],
+    )
+end
+
+function sv_energy_window_mask(E::AbstractVector{<:Real}, windows::Vector{Tuple{Float64,Float64}})
+    mask = falses(length(E))
+    for (lo, hi) in windows
+        mask .|= (E .>= lo) .& (E .<= hi)
+    end
+    return mask
+end
+
+function sv_background_fields_from_controls(controls::Dict)
+    kc = controls["kpm"]
+    vals = get(kc, "background_fields_T", Any[0.0, 9.0, 14.0])
+    return Float64.(vals)
+end
+
+function sv_structured_residual_windows_from_controls(controls::Dict)
+    kc = controls["kpm"]
+    # Keep defaults identical to the analytical co-fit background model.
+    d = Dict{String,Tuple{Float64,Float64}}(
+        "0p33_0p33_0" => (1.675, 2.375),
+        "0p5_0_0" => (1.825, 2.425),
+    )
+    if haskey(kc, "structured_residual_windows")
+        d = Dict{String,Tuple{Float64,Float64}}()
+        for (qtag, win) in kc["structured_residual_windows"]
+            length(win) == 2 || error("structured_residual_windows.$qtag must have length 2")
+            d[String(qtag)] = (Float64(win[1]), Float64(win[2]))
+        end
+    end
+    return d
+end
+
+function sv_common_energy_grid(byfield::Dict{Float64,SVRawNeutronScan1D}, fields::Vector{Float64}; atol=1e-10)
+    missing = [B for B in fields if !haskey(byfield, B)]
+    isempty(missing) || error("Missing required background field scans: $missing")
+    Eref = byfield[fields[1]].energy_meV
+    for B in fields[2:end]
+        E = byfield[B].energy_meV
+        length(E) == length(Eref) || error("Energy grid length mismatch for q=$(byfield[B].qtag), B=$B")
+        maximum(abs.(E .- Eref)) <= atol || error("Energy grids are not identical for q=$(byfield[B].qtag), B=$B")
+    end
+    return copy(Eref)
+end
+
+function sv_min_over_fields_background_raw(byfield::Dict{Float64,SVRawNeutronScan1D}, fields::Vector{Float64}; low_window=(0.0,0.75), high_threshold=2.5)
+    E = sv_common_energy_grid(byfield, fields)
+    I_by_field = [byfield[B].intensity for B in fields]
+    Imin = similar(E)
+    for i in eachindex(E)
+        Imin[i] = minimum(I[i] for I in I_by_field)
+    end
+    lo, hi = low_window
+    mask = ((E .>= lo) .& (E .<= hi)) .| (E .> high_threshold)
+    return E[mask], Imin[mask]
+end
+
+function sv_sort_xy(x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    length(x) == length(y) || error("x and y must have same length")
+    p = sortperm(x)
+    return Float64.(x[p]), Float64.(y[p])
+end
+
+function sv_gaussian_smooth_xy(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}, sigma::Real)
+    if sigma <= 0
+        return Float64.(y)
+    end
+    ys = similar(Float64.(y))
+    σ2 = Float64(sigma)^2
+    for i in eachindex(x)
+        wsum = 0.0
+        ysum = 0.0
+        xi = Float64(x[i])
+        for j in eachindex(x)
+            dx = Float64(x[j]) - xi
+            w = exp(-0.5 * dx^2 / σ2)
+            wsum += w
+            ysum += w * Float64(y[j])
+        end
+        ys[i] = ysum / wsum
+    end
+    return ys
+end
+
+struct SVPchipInterpolator
+    x::Vector{Float64}
+    y::Vector{Float64}
+    m::Vector{Float64}
+end
+
+function sv_pchip_endpoint_slope(h1::Float64, h2::Float64, d1::Float64, d2::Float64)
+    m = ((2.0*h1 + h2)*d1 - h1*d2) / (h1 + h2)
+    if sign(m) != sign(d1)
+        return 0.0
+    elseif sign(d1) != sign(d2) && abs(m) > abs(3.0*d1)
+        return 3.0*d1
+    else
+        return m
+    end
+end
+
+function sv_pchip_interpolator(xin::AbstractVector{<:Real}, yin::AbstractVector{<:Real})
+    x, y = sv_sort_xy(xin, yin)
+    n = length(x)
+    n >= 2 || error("Need at least two points for PCHIP interpolation")
+    any(diff(x) .<= 0) && error("PCHIP x-values must be strictly increasing")
+    if n == 2
+        d = (y[2] - y[1]) / (x[2] - x[1])
+        return SVPchipInterpolator(x, y, [d, d])
+    end
+    h = diff(x)
+    d = diff(y) ./ h
+    m = zeros(Float64, n)
+    m[1] = sv_pchip_endpoint_slope(h[1], h[2], d[1], d[2])
+    m[n] = sv_pchip_endpoint_slope(h[end], h[end-1], d[end], d[end-1])
+    for k in 2:n-1
+        if d[k-1] == 0.0 || d[k] == 0.0 || sign(d[k-1]) != sign(d[k])
+            m[k] = 0.0
+        else
+            w1 = 2.0*h[k] + h[k-1]
+            w2 = h[k] + 2.0*h[k-1]
+            m[k] = (w1 + w2) / (w1/d[k-1] + w2/d[k])
+        end
+    end
+    return SVPchipInterpolator(x, y, m)
+end
+
+function (p::SVPchipInterpolator)(x0::Real)
+    x = p.x; y = p.y; m = p.m
+    n = length(x)
+    j = searchsortedlast(x, Float64(x0))
+    j = clamp(j, 1, n - 1)
+    h = x[j+1] - x[j]
+    t = (Float64(x0) - x[j]) / h
+    h00 = 2.0*t^3 - 3.0*t^2 + 1.0
+    h10 = t^3 - 2.0*t^2 + t
+    h01 = -2.0*t^3 + 3.0*t^2
+    h11 = t^3 - t^2
+    return h00*y[j] + h10*h*m[j] + h01*y[j+1] + h11*h*m[j+1]
+end
+
+(p::SVPchipInterpolator)(xv::AbstractVector{<:Real}) = [p(x) for x in xv]
+
+function sv_make_interpolated_background(Egrid::AbstractVector{<:Real}, Eraw::AbstractVector{<:Real}, Iraw::AbstractVector{<:Real}; smooth_sigma_meV::Real=0.0, interpolation_kind::Symbol=:pchip)
+    Es, Is = sv_sort_xy(Eraw, Iraw)
+    Is_smooth = sv_gaussian_smooth_xy(Es, Is, smooth_sigma_meV)
+    bg = if interpolation_kind == :linear
+        sv_interp1(Es, Is_smooth, Float64.(Egrid))
+    elseif interpolation_kind == :pchip
+        sv_pchip_interpolator(Es, Is_smooth)(Egrid)
+    else
+        error("Unknown interpolation_kind=$interpolation_kind. Use :pchip or :linear for Sunny validation background.")
+    end
+    return bg, Es, Is_smooth
+end
+
+function sv_ridge_linear_least_squares(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real}, err=nothing; ridge_lambda::Real=0.0, unpenalized_columns::Vector{Int}=Int[])
+    Xf = Float64.(X); yf = Float64.(y)
+    if err !== nothing
+        σ = max.(Float64.(err), eps(Float64))
+        sw = 1.0 ./ σ
+        Xf = Xf .* sw
+        yf = yf .* sw
+    end
+    A = transpose(Xf) * Xf
+    b = transpose(Xf) * yf
+    if ridge_lambda > 0
+        penalty = Matrix{Float64}(I, size(A,1), size(A,2))
+        for j in unpenalized_columns
+            penalty[j,j] = 0.0
+        end
+        A .+= Float64(ridge_lambda) .* penalty
+    end
+    return A \ b
+end
+
+function sv_continuum_design_matrix(E::AbstractVector{<:Real}; model::Symbol=:power_tail, power::Real=3.0, energy_offset::Real=0.15, include_linear_tilt::Bool=false)
+    Ef = Float64.(E)
+    cols = Vector{Vector{Float64}}()
+    push!(cols, ones(length(Ef)))
+    if model == :power_tail
+        push!(cols, (Ef .+ Float64(energy_offset)) .^ (-Float64(power)))
+    elseif model == :exp_tail
+        push!(cols, exp.(-Ef ./ Float64(power)))
+    elseif model == :line
+        push!(cols, Ef .- mean(Ef))
+    else
+        error("Unknown continuum model=$model")
+    end
+    if include_linear_tilt && model != :line
+        push!(cols, Ef .- mean(Ef))
+    end
+    return hcat(cols...)
+end
+
+function sv_eval_continuum_model(E::AbstractVector{<:Real}, coeff::AbstractVector{<:Real}; model::Symbol=:power_tail, power::Real=3.0, energy_offset::Real=0.15, include_linear_tilt::Bool=false, center_energy::Real=0.0)
+    Ef = Float64.(E)
+    y = fill(Float64(coeff[1]), length(Ef))
+    j = 2
+    if model == :power_tail
+        y .+= Float64(coeff[j]) .* (Ef .+ Float64(energy_offset)) .^ (-Float64(power)); j += 1
+    elseif model == :exp_tail
+        y .+= Float64(coeff[j]) .* exp.(-Ef ./ Float64(power)); j += 1
+    elseif model == :line
+        y .+= Float64(coeff[j]) .* (Ef .- Float64(center_energy)); j += 1
+    else
+        error("Unknown continuum model=$model")
+    end
+    if include_linear_tilt && model != :line
+        y .+= Float64(coeff[j]) .* (Ef .- Float64(center_energy))
+    end
+    return y
+end
+
+function sv_fit_zeroT_continuum_baseline(Efit::AbstractVector{<:Real}, Ifit::AbstractVector{<:Real}; errfit=nothing, model::Symbol=:power_tail, power_grid=collect(0.5:0.05:8.0), exp_tau_grid=collect(0.25:0.025:3.0), energy_offset::Real=0.15, ridge_lambda::Real=0.0, include_linear_tilt::Bool=false, positive_tail::Bool=true)
+    Ef = Float64.(Efit); If = Float64.(Ifit)
+    center_energy = mean(Ef)
+    scan_grid = model == :power_tail ? collect(power_grid) : model == :exp_tail ? collect(exp_tau_grid) : [NaN]
+    best_score = Inf; best_coeff = Float64[]; best_param = NaN
+    for param in scan_grid
+        X = sv_continuum_design_matrix(Ef; model, power=isnan(param) ? 3.0 : param, energy_offset, include_linear_tilt)
+        coeff = sv_ridge_linear_least_squares(X, If, errfit; ridge_lambda, unpenalized_columns=[1])
+        if positive_tail && (model == :power_tail || model == :exp_tail) && coeff[2] < 0
+            continue
+        end
+        pred = X * coeff
+        resid = If .- pred
+        score = if errfit !== nothing
+            σ = max.(Float64.(errfit), eps(Float64))
+            mean((resid ./ σ).^2)
+        else
+            mean(resid.^2)
+        end
+        if score < best_score
+            best_score = score
+            best_coeff = Float64.(coeff)
+            best_param = isnan(param) ? 3.0 : Float64(param)
+        end
+    end
+    if isempty(best_coeff)
+        return sv_fit_zeroT_continuum_baseline(Efit, Ifit; errfit, model, power_grid, exp_tau_grid, energy_offset, ridge_lambda, include_linear_tilt, positive_tail=false)
+    end
+    baseline(Enew) = sv_eval_continuum_model(Enew, best_coeff; model, power=best_param, energy_offset, include_linear_tilt, center_energy)
+    return baseline, best_coeff, best_param, best_score
+end
+
+function sv_structured_residual_points(byfield::Dict{Float64,SVRawNeutronScan1D}, residual_window::Tuple{Float64,Float64}; fit_window=(1.0,3.0), model::Symbol=:power_tail, power_grid=collect(0.5:0.05:8.0), exp_tau_grid=collect(0.25:0.025:3.0), energy_offset::Real=0.15, ridge_lambda::Real=0.0, include_linear_tilt::Bool=false, positive_tail::Bool=true, clip_negative_residuals::Bool=false)
+    s0 = byfield[0.0]
+    E = s0.energy_meV
+    I0 = s0.intensity
+    fit_lo, fit_hi = fit_window
+    res_lo, res_hi = residual_window
+    peak_mask = (E .>= res_lo) .& (E .<= res_hi)
+    fit_mask = (E .>= fit_lo) .& (E .<= fit_hi) .& .!peak_mask
+    any(fit_mask) || error("No points for 0 T continuum fit outside residual window")
+    any(peak_mask) || error("No points inside residual window $residual_window")
+    Efit = E[fit_mask]; Ifit = I0[fit_mask]; errfit = s0.error[fit_mask]
+    baseline_fun, coeff, param, score = sv_fit_zeroT_continuum_baseline(Efit, Ifit; errfit, model, power_grid, exp_tau_grid, energy_offset, ridge_lambda, include_linear_tilt, positive_tail)
+    Eres = E[peak_mask]
+    baseline = baseline_fun(Eres)
+    residual = I0[peak_mask] .- baseline
+    if clip_negative_residuals
+        residual = max.(residual, 0.0)
+    end
+    @printf("%s 0T continuum baseline: model=%s, param=%.4g, score=%.4g, coeff=%s\n", s0.qtag, String(model), param, score, repr(coeff))
+    return Eres, residual, Efit, Ifit, baseline
+end
+
+function sv_make_analytical_background_model(qtag::String, byfield::Dict{Float64,SVRawNeutronScan1D}, controls::Dict)
+    kc = controls["kpm"]
+    fields = sv_background_fields_from_controls(controls)
+    low_window = Tuple(Float64.(get(kc, "min_bg_low_window_meV", Any[0.0, 0.75])))
+    high_threshold = Float64(get(kc, "min_bg_high_threshold_meV", 2.5))
+    fit_window = Tuple(Float64.(get(kc, "structured_fit_window_meV", Any[1.0, 3.0])))
+    final_smooth_sigma_meV = Float64(get(kc, "background_smooth_sigma_meV", 0.0))
+    final_interp_kind = Symbol(get(kc, "background_interp_kind", "pchip"))
+    residual_windows = sv_structured_residual_windows_from_controls(controls)
+    zeroT_baseline_model = Symbol(get(kc, "zeroT_baseline_model", "power_tail"))
+    energy_offset = Float64(get(kc, "zeroT_baseline_energy_offset_meV", 0.15))
+    ridge_lambda = Float64(get(kc, "zeroT_baseline_ridge_lambda", 0.0))
+    include_linear_tilt = Bool(get(kc, "zeroT_baseline_include_linear_tilt", false))
+    positive_tail = Bool(get(kc, "zeroT_baseline_positive_tail", true))
+    clip_negative_residuals = Bool(get(kc, "clip_negative_structured_residuals", false))
+
+    Egrid = sv_common_energy_grid(byfield, fields)
+    E_lowhigh, I_lowhigh = sv_min_over_fields_background_raw(byfield, fields; low_window, high_threshold)
+    Eraw = copy(E_lowhigh); Iraw = copy(I_lowhigh)
+
+    if haskey(residual_windows, qtag)
+        Eres, residual, _, _, _ = sv_structured_residual_points(byfield, residual_windows[qtag]; fit_window, model=zeroT_baseline_model, energy_offset, ridge_lambda, include_linear_tilt, positive_tail, clip_negative_residuals)
+        bg_without_residual, _, _ = sv_make_interpolated_background(Egrid, E_lowhigh, I_lowhigh; smooth_sigma_meV=final_smooth_sigma_meV, interpolation_kind=final_interp_kind)
+        residual_base = sv_interp1(Float64.(Egrid), Float64.(bg_without_residual), Eres)
+        residual_abs_bg = residual_base .+ residual
+        append!(Eraw, Eres)
+        append!(Iraw, residual_abs_bg)
+    end
+
+    bg, _, _ = sv_make_interpolated_background(Egrid, Eraw, Iraw; smooth_sigma_meV=final_smooth_sigma_meV, interpolation_kind=final_interp_kind)
+    return Float64.(bg)
+end
+
+function sv_constant_tail_background(E::AbstractVector, I::AbstractVector, controls::Dict)
+    kc = controls["kpm"]
+    windows = get(kc, "tail_background_windows_meV", Any[[0.0, 0.75], [2.5, 4.0]])
+    vals = Float64[]
+    for win in windows
+        length(win) == 2 || error("Each tail_background_windows_meV entry must have length 2")
+        lo = Float64(win[1]); hi = Float64(win[2])
+        for (e, y) in zip(E, I)
+            if isfinite(e) && isfinite(y) && lo <= e <= hi
+                push!(vals, Float64(y))
+            end
+        end
+    end
+    isempty(vals) && return zeros(Float64, length(E))
+    method = Symbol(get(kc, "tail_background_statistic", "median"))
+    bg = method == :mean ? mean(vals) : method == :median ? median(vals) : error("Unknown tail_background_statistic=$method")
+    return fill(bg, length(E))
+end
+
+function sv_make_corrected_cut(raw::SVRawNeutronScan1D, bg::AbstractVector, controls::Dict)
+    mode = Symbol(get(controls["kpm"], "data_mode", "tail_bgsub"))
+    length(bg) == length(raw.energy_meV) || error("Background length mismatch for $(raw.path)")
+    I = if mode == :raw || mode == :file_intensity
+        Float64.(raw.intensity)
+    elseif mode in (:tail_bgsub, :spline_bgsub, :bgsub, :analytical_bgsub)
+        Float64.(raw.intensity) .- Float64.(bg)
+    else
+        error("Unknown kpm data_mode=$mode")
+    end
+    return SVNeutronCut1D(
+        raw.path,
+        raw.Ei_meV,
+        raw.temperature_K,
+        raw.field_T,
+        raw.qtag,
+        copy(raw.energy_meV),
+        I,
+        copy(raw.error),
+        copy(raw.intensity),
+        mode == :raw || mode == :file_intensity ? zeros(Float64, length(raw.energy_meV)) : Float64.(bg),
+        mode == :raw || mode == :file_intensity ? 0.0 : mean(Float64.(bg)),
+        mode,
+    )
+end
+
+function sv_make_corrected_cuts_for_qtag(qtag::String, byfield::Dict{Float64,SVRawNeutronScan1D}, controls::Dict)
+    mode = Symbol(get(controls["kpm"], "data_mode", "tail_bgsub"))
+    bg_by_field = Dict{Float64,Vector{Float64}}()
+    if mode == :raw || mode == :file_intensity
+        for (B, raw) in byfield
+            bg_by_field[B] = zeros(Float64, length(raw.energy_meV))
+        end
+    elseif mode in (:tail_bgsub, :spline_bgsub, :bgsub, :analytical_bgsub)
+        bg = sv_make_analytical_background_model(qtag, byfield, controls)
+        for (B, raw) in byfield
+            bg_by_field[B] = copy(bg)
+        end
+    elseif mode == :constant_tail_bgsub
+        for (B, raw) in byfield
+            bg_by_field[B] = sv_constant_tail_background(raw.energy_meV, raw.intensity, controls)
+        end
+    else
+        error("Unknown kpm data_mode=$mode")
+    end
+    return Dict(B => sv_make_corrected_cut(raw, bg_by_field[B], controls) for (B, raw) in byfield)
+end
+
+function sv_load_kpm_experimental_cuts(repo_root::AbstractString, controls::Dict)
+    kc = controls["kpm"]
+    dir = sv_repo_path(repo_root, controls["paths"]["neutron_1d_dir"])
+    isdir(dir) || error("Could not find neutron 1D directory: $dir")
+
+    target_Ei = Float64(get(kc, "Ei_meV", 4.65))
+    target_T = Float64(get(kc, "temperature_K", 0.07))
+    target_fields = Float64.(controls["common"]["fields_T"])
+    background_fields = sv_background_fields_from_controls(controls)
+    needed_fields = unique(vcat(target_fields, background_fields))
+    qtags = Set(String.(kc["qtags"]))
+
+    raw_by_q = Dict{String,Dict{Float64,SVRawNeutronScan1D}}()
+    for fname in sort(readdir(dir))
+        endswith(lowercase(fname), ".dat") || continue
+        path = joinpath(dir, fname)
+        meta = try
+            sv_parse_neutron_1d_filename(path)
+        catch
+            continue
+        end
+        sv_nearly_equal(meta.Ei_meV, target_Ei; atol=1e-3) || continue
+        sv_nearly_equal(meta.temperature_K, target_T; atol=1e-3) || continue
+        meta.qtag in qtags || continue
+        any(B -> sv_nearly_equal(meta.field_T, B; atol=1e-3), needed_fields) || continue
+        raw = sv_load_neutron_raw_scan_1d(path, controls)
+        if !haskey(raw_by_q, raw.qtag)
+            raw_by_q[raw.qtag] = Dict{Float64,SVRawNeutronScan1D}()
+        end
+        raw_by_q[raw.qtag][raw.field_T] = raw
+    end
+
+    cuts = SVNeutronCut1D[]
+    for qtag in sort(collect(qtags))
+        haskey(raw_by_q, qtag) || error("No raw scans found for qtag=$qtag")
+        corrected = sv_make_corrected_cuts_for_qtag(qtag, raw_by_q[qtag], controls)
+        for B in target_fields
+            haskey(corrected, B) || error("No corrected target-field cut for qtag=$qtag, B=$B")
+            push!(cuts, corrected[B])
+        end
+    end
+
+    sort!(cuts; by = c -> (c.field_T, c.qtag))
+    return cuts
+end
+
+function sv_nearly_equal(a::Real, b::Real; atol::Real=1e-6)
+    return abs(Float64(a) - Float64(b)) <= Float64(atol)
+end
+
+function sv_find_cut(cuts::Vector{SVNeutronCut1D}, field_T::Real, qtag::AbstractString)
+    for cut in cuts
+        if sv_nearly_equal(cut.field_T, field_T; atol=1e-3) && cut.qtag == qtag
+            return cut
+        end
+    end
+    return nothing
+end
+
+function sv_energy_bin_edges(E::AbstractVector)
+    n = length(E)
+    n >= 2 || error("Need at least two energy points to infer bin edges")
+    edges = zeros(Float64, n + 1)
+    for i in 2:n
+        edges[i] = 0.5 * (E[i-1] + E[i])
+    end
+    edges[1] = E[1] - 0.5 * (E[2] - E[1])
+    edges[end] = E[end] + 0.5 * (E[end] - E[end-1])
+    return edges
+end
+
+function sv_model_to_experimental_energy_grid(
+    E_model::AbstractVector,
+    I_model::AbstractVector,
+    E_exp::AbstractVector;
+    mode::Symbol = :bin_average,
+)
+    Em = Float64.(E_model)
+    Im = Float64.(I_model)
+    Ee = Float64.(E_exp)
+
+    idx = sortperm(Em)
+    Em = Em[idx]
+    Im = Im[idx]
+
+    if mode == :interpolate
+        return sv_interp1(Em, Im, Ee)
+    elseif mode == :bin_average
+        edges = sv_energy_bin_edges(Ee)
+        out = fill(NaN, length(Ee))
+        for i in eachindex(Ee)
+            lo = edges[i]
+            hi = edges[i+1]
+            mask = (Em .>= lo) .& (Em .< hi) .& isfinite.(Im)
+            if any(mask)
+                out[i] = mean(Im[mask])
+            else
+                out[i] = sv_interp1(Em, Im, [Ee[i]])[1]
+            end
+        end
+        return out
+    else
+        error("Unknown histogram/interpolation mode = $mode")
+    end
+end
+
+function sv_neutron_scale(params, controls::Dict)
+    kc = controls["kpm"]
+    if get(kc, "use_neutron_global_scale_from_best_fit", true)
+        hasproperty(params, :neutron_global_scale) || error("Canonical params do not include neutron_global_scale")
+        return Float64(params.neutron_global_scale)
+    else
+        return Float64(get(kc, "manual_neutron_global_scale", 1.0))
+    end
+end
+
+function sv_flat_neutron_weight(params, controls::Dict)
+    r2 = sv_second_kernel_weight(params, controls)
+    kc = controls["kpm"]
+    if get(kc, "include_gperp_ratio_intensity_weight", true)
+        return r2 * params.gperp_ratio^2
+    else
+        return r2
+    end
+end
+
+function sv_write_neutron_cut_inventory(path::AbstractString, cuts::Vector{SVNeutronCut1D})
+    mkpath(dirname(path))
+    open(path, "w") do io
+        println(io, "path,Ei_meV,temperature_K,field_T,qtag,n_E,E_min_meV,E_max_meV,I_min,I_max,rawI_min,rawI_max,bg_min,bg_max,data_mode,background_mean")
+        for c in cuts
+            println(io, join([
+                c.path,
+                c.Ei_meV,
+                c.temperature_K,
+                c.field_T,
+                c.qtag,
+                length(c.energy_meV),
+                minimum(c.energy_meV),
+                maximum(c.energy_meV),
+                minimum(c.intensity),
+                maximum(c.intensity),
+                minimum(c.raw_intensity),
+                maximum(c.raw_intensity),
+                minimum(c.background),
+                maximum(c.background),
+                String(c.data_mode),
+                c.background_level,
+            ], ","))
+        end
+    end
+end
+
+function sv_check_neutron_cut_loading(repo_root::AbstractString; controls=sv_load_controls(repo_root))
+    cuts = sv_load_kpm_experimental_cuts(repo_root, controls)
+    out_table_dir = sv_repo_path(repo_root, controls["paths"]["table_subdir"])
+    mkpath(out_table_dir)
+    inventory_path = joinpath(out_table_dir, "neutron_1d_cut_inventory.csv")
+    sv_write_neutron_cut_inventory(inventory_path, cuts)
+
+    println("Loaded neutron 1D cuts for Sunny validation")
+    println("------------------------------------------")
+    for c in cuts
+        @printf("B=%6.3f T  q=%-14s  n=%4d  E=[%7.3f,%7.3f] meV  I=[% .4g,% .4g]  mode=%s  bg=[% .4g,% .4g] mean=% .6g\n",
+            c.field_T, c.qtag, length(c.energy_meV),
+            minimum(c.energy_meV), maximum(c.energy_meV),
+            minimum(c.intensity), maximum(c.intensity),
+            String(c.data_mode), minimum(c.background), maximum(c.background), c.background_level)
+    end
+    println()
+    println("Wrote inventory:")
+    println(inventory_path)
+    return (; cuts, inventory_path)
+end
+
+
 function sv_qtag_to_q(qtag::AbstractString)
     if qtag == "0_1_0"
         return [0.0, 1.0, 0.0]
@@ -660,15 +1400,15 @@ end
 
 function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, field_T::Real, qtag::AbstractString)
     kc = controls["kpm"]
-    dims = sv_dims_tuple(kc["dims"])
-    repeat_factor = sv_dims_tuple(kc["repeat_factor"])
+    sizectl = sv_system_size_controls(controls, "kpm")
+    dims = sizectl.dims
+    repeat_factor = sizectl.repeat_factor
     include_exchange = get(kc, "include_exchange_disorder", true)
     include_gzz = get(kc, "include_gzz_disorder", true)
     maxiters = Int(kc["maxiters"])
 
     base = sv_build_effective_sunny_system(params, controls; component, dims, field_T)
     sys = base.sys
-    cryst = base.crystal
     if repeat_factor != (1,1,1)
         sys = to_inhomogeneous(repeat_periodically(sys, repeat_factor))
     else
@@ -684,27 +1424,162 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
     swt = SpinWaveTheoryKPM(sys; measure=ssf_perp(sys), tol=Float64(kc["tol"]))
-    # Sunny supports either QPath objects or explicit arrays of q-points.
-    # Use a single explicit q here because the experimental validation target is
-    # a fixed 1D energy cut at each qtag, not a high-symmetry path plot.
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
-    # For a fixed-q two-point path, average all q columns if possible.
+
     I = if raw isa AbstractVector
         Float64.(raw)
     elseif raw isa AbstractMatrix
-        vec(mean(Float64.(raw); dims=1))
+        # Common Sunny layouts are (nq, nE) or (nE, nq).  Since we supply one
+        # q-point, choose the orientation that matches the energy axis.
+        r, c = size(raw)
+        if r == length(energies)
+            vec(mean(Float64.(raw); dims=2))
+        elseif c == length(energies)
+            vec(mean(Float64.(raw); dims=1))
+        else
+            vec(Float64.(raw))[1:min(length(raw), length(energies))]
+        end
     else
         error("Unsupported Sunny intensity container type: $(typeof(raw))")
     end
-    # If orientation is transposed, trim/interpolate by length.
+
     if length(I) != length(energies)
-        I = vec(Float64.(raw))[1:min(end, length(energies))]
-        if length(I) < length(energies)
-            append!(I, fill(NaN, length(energies)-length(I)))
-        end
+        tmp = fill(NaN, length(energies))
+        n = min(length(I), length(energies))
+        tmp[1:n] .= I[1:n]
+        I = tmp
     end
     return (; energy_meV=energies, intensity=I, result=res)
+end
+
+
+function sv_kpm_neutron_scale_mode(controls::Dict)
+    kc = controls["kpm"]
+    if haskey(kc, "neutron_scale_mode")
+        return Symbol(kc["neutron_scale_mode"])
+    end
+
+    # Backward-compatible interpretation of the older controls.
+    if get(kc, "use_neutron_global_scale_from_best_fit", true)
+        return :best_fit
+    else
+        return :manual
+    end
+end
+
+function sv_kpm_neutron_scale_scope(controls::Dict)
+    kc = controls["kpm"]
+    return Symbol(get(kc, "neutron_scale_scope", "global"))
+end
+
+function sv_kpm_neutron_scale_mask(E::AbstractVector, y::AbstractVector, x::AbstractVector, err::AbstractVector, controls::Dict)
+    kc = controls["kpm"]
+    mask = isfinite.(E) .& isfinite.(y) .& isfinite.(x) .& isfinite.(err)
+
+    if haskey(kc, "neutron_scale_fit_window_meV")
+        win = Float64.(kc["neutron_scale_fit_window_meV"])
+        length(win) == 2 || error("kpm.neutron_scale_fit_window_meV must have two entries")
+        mask .&= (E .>= win[1]) .& (E .<= win[2])
+    end
+
+    if get(kc, "neutron_scale_positive_experiment_only", false)
+        mask .&= y .> 0
+    end
+
+    if get(kc, "neutron_scale_positive_model_only", false)
+        mask .&= x .> 0
+    end
+
+    return mask
+end
+
+function sv_kpm_scale_weights(err::AbstractVector, controls::Dict)
+    kc = controls["kpm"]
+    if get(kc, "neutron_scale_use_uncertainties", true)
+        e = Float64.(err)
+        finite_positive = e[isfinite.(e) .& (e .> 0)]
+        floor = isempty(finite_positive) ? 1.0 : minimum(finite_positive)
+        e = map(v -> (isfinite(v) && v > 0) ? v : floor, e)
+        return 1.0 ./ (e .^ 2)
+    else
+        return ones(Float64, length(err))
+    end
+end
+
+function sv_best_positive_scale_least_squares(y::AbstractVector, x::AbstractVector, err::AbstractVector, E::AbstractVector, controls::Dict; fallback::Float64=1.0)
+    mask = sv_kpm_neutron_scale_mask(E, y, x, err, controls)
+    if !any(mask)
+        @warn "No finite points available for least-squares neutron scale; using fallback" fallback
+        return fallback
+    end
+    w = sv_kpm_scale_weights(err, controls)
+    xx = Float64.(x[mask])
+    yy = Float64.(y[mask])
+    ww = Float64.(w[mask])
+    denom = sum(ww .* xx .* xx)
+    min_model_power = Float64(get(controls["kpm"], "neutron_scale_min_model_power", 1e-30))
+    if !(isfinite(denom) && denom > min_model_power)
+        @warn "Degenerate or nearly-zero Sunny model for least-squares neutron scale; using fallback" fallback denom min_model_power maximum_abs_model=maximum(abs.(xx))
+        return fallback
+    end
+    s = sum(ww .* xx .* yy) / denom
+    if get(controls["kpm"], "neutron_scale_nonnegative", true)
+        s = max(0.0, s)
+    end
+    max_abs_scale = Float64(get(controls["kpm"], "neutron_scale_max_abs", Inf))
+    if !(isfinite(s))
+        @warn "Non-finite least-squares neutron scale; using fallback" fallback scale=s
+        return fallback
+    elseif abs(s) > max_abs_scale
+        @warn "Least-squares neutron scale exceeded configured guard; using fallback" fallback scale=s max_abs_scale denom maximum_abs_model=maximum(abs.(xx))
+        return fallback
+    end
+    return Float64(s)
+end
+
+function sv_best_positive_scale_max_match(y::AbstractVector, x::AbstractVector, err::AbstractVector, E::AbstractVector, controls::Dict; fallback::Float64=1.0)
+    mask = sv_kpm_neutron_scale_mask(E, y, x, err, controls)
+    if !any(mask)
+        @warn "No finite points available for max-match neutron scale; using fallback" fallback
+        return fallback
+    end
+    yy = Float64.(y[mask])
+    xx = Float64.(x[mask])
+    ymax = maximum(yy)
+    xmax = maximum(xx)
+    min_model_peak = Float64(get(controls["kpm"], "neutron_scale_min_model_peak", 1e-15))
+    if !(isfinite(ymax) && isfinite(xmax) && abs(xmax) > min_model_peak)
+        @warn "Degenerate or nearly-zero model/data for max-match neutron scale; using fallback" fallback ymax xmax min_model_peak
+        return fallback
+    end
+    s = ymax / xmax
+    if get(controls["kpm"], "neutron_scale_nonnegative", true)
+        s = max(0.0, s)
+    end
+    max_abs_scale = Float64(get(controls["kpm"], "neutron_scale_max_abs", Inf))
+    if !(isfinite(s))
+        @warn "Non-finite max-match neutron scale; using fallback" fallback scale=s
+        return fallback
+    elseif abs(s) > max_abs_scale
+        @warn "Max-match neutron scale exceeded configured guard; using fallback" fallback scale=s max_abs_scale ymax xmax
+        return fallback
+    end
+    return Float64(s)
+end
+
+function sv_compute_neutron_scale(mode::Symbol, y::AbstractVector, x::AbstractVector, err::AbstractVector, E::AbstractVector, controls::Dict; fallback::Float64=1.0)
+    if mode == :best_fit
+        return fallback
+    elseif mode == :manual
+        return fallback
+    elseif mode == :least_squares
+        return sv_best_positive_scale_least_squares(y, x, err, E, controls; fallback)
+    elseif mode == :max_match
+        return sv_best_positive_scale_max_match(y, x, err, E, controls; fallback)
+    else
+        error("Unknown kpm.neutron_scale_mode = $mode. Use best_fit, manual, least_squares, or max_match.")
+    end
 end
 
 function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo_root))
@@ -716,38 +1591,136 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
     out_fig_dir = sv_repo_path(repo_root, controls["paths"]["figure_subdir"])
     mkpath(out_table_dir); mkpath(out_fig_dir)
 
+    cuts = sv_load_kpm_experimental_cuts(repo_root, controls)
+    inventory_path = joinpath(out_table_dir, "sunny_kpm_neutron_1d_cut_inventory.csv")
+    sv_write_neutron_cut_inventory(inventory_path, cuts)
+
     fields = Float64.(controls["common"]["fields_T"])
     qtags = String.(controls["kpm"]["qtags"])
-    r2 = sv_second_kernel_weight(params, controls)
+    fallback_neutron_scale = sv_neutron_scale(params, controls)
+    scale_mode = sv_kpm_neutron_scale_mode(controls)
+    scale_scope = sv_kpm_neutron_scale_scope(controls)
+    flat_weight = sv_flat_neutron_weight(params, controls)
+    hist_mode = Symbol(get(controls["kpm"], "histogram_mode", "bin_average"))
+    sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
+    kpm_sizectl = sv_system_size_controls(controls, "kpm")
+    flat_to_dispersive_fraction = sv_second_kernel_weight(params, controls)
 
-    all_rows = NamedTuple[]
+    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size data_cuts=length(cuts)
+
+    # First compute all unscaled Sunny spectra on the experimental energy grids.
+    # The neutron intensity scale can then be either fixed, fitted globally, or
+    # fitted per cut without rerunning Sunny/KPM.
+    cut_results = NamedTuple[]
     for B in fields
         for qtag in qtags
-            @info "Computing Sunny KPM cut" B_T=B qtag=qtag
+            cut = sv_find_cut(cuts, B, qtag)
+            cut === nothing && error("No experimental 1D cut found for B=$B T qtag=$qtag. Check kpm Ei/T/field/qtag controls.")
+
+            @info "Computing Sunny KPM cut and histogramming to experiment" B_T=B qtag=qtag nE_exp=length(cut.energy_meV)
             disp = sv_kpm_component_spectrum(params, controls; component=:dispersive, field_T=B, qtag)
             flat = sv_kpm_component_spectrum(params, controls; component=:flat, field_T=B, qtag)
-            total = disp.intensity .+ r2 .* flat.intensity
-            csv_path = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT.csv", qtag, B))
-            sv_write_xy_csv(csv_path, "energy_meV,I_total,I_dispersive,I_flat,second_kernel_weight", disp.energy_meV, total, disp.intensity, flat.intensity, fill(r2, length(total)))
-            push!(all_rows, (; B_T=B, qtag, csv_path))
+
+            Idisp_grid = sv_model_to_experimental_energy_grid(disp.energy_meV, disp.intensity, cut.energy_meV; mode=hist_mode)
+            Iflat_grid = sv_model_to_experimental_energy_grid(flat.energy_meV, flat.intensity, cut.energy_meV; mode=hist_mode)
+            Itotal_unscaled = Idisp_grid .+ flat_weight .* Iflat_grid
+
+            push!(cut_results, (;
+                B_T = B,
+                qtag = qtag,
+                cut = cut,
+                Idisp_grid = Idisp_grid,
+                Iflat_grid = Iflat_grid,
+                Itotal_unscaled = Itotal_unscaled,
+            ))
         end
     end
 
-    # Summary plot from the saved CSVs.
-    fig = Figure(size=(1200, 750))
-    for (iq, qtag) in enumerate(qtags)
-        ax = Axis(fig[iq,1], xlabel="Energy (meV)", ylabel="arb.", title="Sunny KPM 1D $(qtag)")
-        for B in fields
-            pathcsv = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT.csv", qtag, B))
-            dat = readdlm(pathcsv, ',', skipstart=1)
-            lines!(ax, dat[:,1], dat[:,2], label=@sprintf("%g T total", B))
-        end
-        axislegend(ax, position=:rt)
+    global_scale = fallback_neutron_scale
+    if scale_scope == :global
+        Ecat = reduce(vcat, [r.cut.energy_meV for r in cut_results])
+        ycat = reduce(vcat, [r.cut.intensity for r in cut_results])
+        ecat = reduce(vcat, [r.cut.error for r in cut_results])
+        xcat = reduce(vcat, [r.Itotal_unscaled for r in cut_results])
+        global_scale = sv_compute_neutron_scale(scale_mode, ycat, xcat, ecat, Ecat, controls; fallback=fallback_neutron_scale)
+    elseif scale_scope == :per_cut
+        # Computed below for each cut.
+    else
+        error("Unknown kpm.neutron_scale_scope = $scale_scope. Use global or per_cut.")
     end
-    fig_path = joinpath(out_fig_dir, "sunny_kpm_1d_summary.png")
+
+    @info "KPM neutron scale selected" scale_mode scale_scope global_scale fallback_neutron_scale
+
+    all_rows = NamedTuple[]
+    for r in cut_results
+        cut = r.cut
+        neutron_scale = if scale_scope == :per_cut
+            sv_compute_neutron_scale(scale_mode, cut.intensity, r.Itotal_unscaled, cut.error, cut.energy_meV, controls; fallback=fallback_neutron_scale)
+        else
+            global_scale
+        end
+
+        Itotal_scaled = neutron_scale .* r.Itotal_unscaled
+        Idisp_scaled = neutron_scale .* r.Idisp_grid
+        Iflat_scaled = neutron_scale .* flat_weight .* r.Iflat_grid
+        residual = cut.intensity .- Itotal_scaled
+
+        csv_path = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT_vs_exp.csv", r.qtag, r.B_T))
+        sv_write_xy_csv(csv_path,
+            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z",
+            cut.energy_meV,
+            cut.intensity,
+            cut.error,
+            Itotal_scaled,
+            Idisp_scaled,
+            Iflat_scaled,
+            r.Itotal_unscaled,
+            r.Idisp_grid,
+            r.Iflat_grid,
+            residual,
+            cut.raw_intensity,
+            cut.background,
+            fill(neutron_scale, length(cut.energy_meV)),
+            fill(String(scale_mode), length(cut.energy_meV)),
+            fill(String(scale_scope), length(cut.energy_meV)),
+            fill(fallback_neutron_scale, length(cut.energy_meV)),
+            fill(flat_weight, length(cut.energy_meV)),
+            fill(flat_to_dispersive_fraction, length(cut.energy_meV)),
+            fill(params.gperp_ratio, length(cut.energy_meV)),
+            fill(kpm_sizectl.dims[1], length(cut.energy_meV)),
+            fill(kpm_sizectl.dims[2], length(cut.energy_meV)),
+            fill(kpm_sizectl.dims[3], length(cut.energy_meV)),
+            fill(kpm_sizectl.repeat_factor[1], length(cut.energy_meV)),
+            fill(kpm_sizectl.repeat_factor[2], length(cut.energy_meV)),
+            fill(kpm_sizectl.repeat_factor[3], length(cut.energy_meV)),
+            fill(kpm_sizectl.system_size[1], length(cut.energy_meV)),
+            fill(kpm_sizectl.system_size[2], length(cut.energy_meV)),
+            fill(kpm_sizectl.system_size[3], length(cut.energy_meV)),
+        )
+        push!(all_rows, (; B_T=r.B_T, qtag=r.qtag, csv_path, neutron_scale))
+    end
+
+    fig = Figure(size=(1300, 850))
+    ylims = get(controls["kpm"], "plot_ylim", nothing)
+    for (iq, qtag) in enumerate(qtags)
+        for (iB, B) in enumerate(fields)
+            ax = Axis(fig[iq,iB], xlabel="Energy (meV)", ylabel="Intensity", title=@sprintf("%s, %g T", qtag, B))
+            pathcsv = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT_vs_exp.csv", qtag, B))
+            dat = readdlm(pathcsv, ',', skipstart=1)
+            scatter!(ax, dat[:,1], dat[:,2], markersize=6, label="experiment")
+            lines!(ax, dat[:,1], dat[:,4], label="Sunny total")
+            lines!(ax, dat[:,1], dat[:,5], linestyle=:dash, label="disp.")
+            lines!(ax, dat[:,1], dat[:,6], linestyle=:dot, label="flat")
+            if ylims !== nothing && length(ylims) == 2
+                ylims!(ax, Float64(ylims[1]), Float64(ylims[2]))
+            end
+            iq == 1 && iB == length(fields) && axislegend(ax, position=:rt)
+        end
+    end
+    fig_path = joinpath(out_fig_dir, "sunny_kpm_1d_vs_experiment.png")
     save(fig_path, fig)
-    @info "Saved KPM Sunny validation" fig_path
-    return (; rows=all_rows, fig_path)
+    @info "Saved KPM Sunny validation" fig_path inventory_path scale_mode scale_scope global_scale fallback_neutron_scale
+    return (; rows=all_rows, fig_path, inventory_path, cuts, scale_mode, scale_scope, global_scale, fallback_neutron_scale)
 end
 
 end # module
