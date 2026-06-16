@@ -32,10 +32,37 @@ seed = 20260611
 sunny_transverse_gxy = 1.0
 
 # Effective triangular-lattice geometry used by the preliminary Sunny builders.
-# The analytical comparison uses reciprocal coordinates more than absolute lengths,
-# so these lengths mostly set plotting/convention scales for Sunny.
-lattice_a_angstrom = 3.4
-lattice_c_angstrom = 10.0
+# These are now set to the same values used in the analytical polarized-state
+# simulation so that Sunny ssf_perp polarization and |Q|-dependent factors use
+# a consistent reciprocal metric.
+lattice_a_angstrom = 3.376
+lattice_c_angstrom = 21.96
+
+[neutron_form_factor]
+# Prefer Sunny's built-in magnetic form-factor machinery inside ssf_perp.
+# The 1D KPM and 2D KPM validation routes both construct their measure
+# through the same shared helper, so this setting applies to both.  This avoids
+# manual |f(Q)|^2 post-multiplication and keeps the neutron measurement
+# convention Sunny-native.  The docs use labels like "Co2", so the default
+# label here is "Yb3"; candidate_ions lets the script try a few nearby Sunny
+# label spellings before erroring.
+enabled = true
+source = "sunny_builtin"   # options: sunny_builtin, manual_yb3, none
+ion = "Yb3"
+candidate_ions = ["Yb3", "Yb3+"]
+on_error = "error"
+
+# Manual fallback controls. These are used only when source = "manual_yb3".
+# Leave the source as sunny_builtin for normal Sunny KPM validation.
+manual_include_j2 = true
+manual_j2_coefficient = 0.75
+manual_apply_as = "intensity_squared"
+
+[neutron_form_factor.lattice]
+# Used only by the manual_yb3 fallback and diagnostic |Q| reporting.
+a_A = 3.376
+c_A = 21.96
+gamma_deg = 120.0
 
 [weights]
 # Best-fit flat / dispersive S=1/2 fraction.

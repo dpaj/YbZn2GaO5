@@ -113,6 +113,202 @@ function sv_sunny_transverse_gxy(controls::Dict)
     return Float64(get(common, "sunny_transverse_gxy", 1.0))
 end
 
+
+# -----------------------------------------------------------------------------
+# Yb3+ magnetic form factor and physical reciprocal-space helpers
+# -----------------------------------------------------------------------------
+
+function sv_radial_integral_j0(s::Real, A::Real, a::Real, B::Real, b::Real, C::Real, c::Real, D::Real)
+    x = Float64(s)^2
+    return A * exp(-a * x) + B * exp(-b * x) + C * exp(-c * x) + D
+end
+
+function sv_radial_integral_jL_nonzero(s::Real, A::Real, a::Real, B::Real, b::Real, C::Real, c::Real, D::Real)
+    x = Float64(s)^2
+    return (A * exp(-a * x) + B * exp(-b * x) + C * exp(-c * x) + D) * x
+end
+
+function sv_yb3_j0(Q_Ainv::Real)
+    # Same coefficients/convention as the analytical 2D polarized-state model.
+    s = Float64(Q_Ainv) / (4.0 * pi)
+    return sv_radial_integral_j0(s, 0.0416, 16.0949, 0.2849, 7.8341, 0.6961, 2.6725, -0.0229)
+end
+
+function sv_yb3_j2(Q_Ainv::Real)
+    # Same coefficients/convention as the analytical 2D polarized-state model.
+    s = Float64(Q_Ainv) / (4.0 * pi)
+    return sv_radial_integral_jL_nonzero(s, 0.1570, 18.5553, 0.8484, 6.5403, 0.8880, 2.0367, 0.0318)
+end
+
+function sv_yb3_form_factor(Q_Ainv::Real; include_j2::Bool=true, c2::Real=0.75)
+    f = include_j2 ? sv_yb3_j0(Q_Ainv) + Float64(c2) * sv_yb3_j2(Q_Ainv) : sv_yb3_j0(Q_Ainv)
+    return isfinite(f) ? f : 1.0
+end
+
+function sv_form_factor_controls(controls::Dict)
+    ff = get(controls, "neutron_form_factor", Dict{String,Any}())
+    ff isa Dict || (ff = Dict{String,Any}())
+
+    enabled = Bool(get(ff, "enabled", false))
+
+    # Prefer Sunny's built-in FormFactor table when computing Sunny intensities.
+    # The manual Yb3+ implementation is retained only as a diagnostic/fallback
+    # so we do not accidentally double-apply a magnetic form factor.
+    source = Symbol(get(ff, "source", "sunny_builtin"))
+    ion = String(get(ff, "ion", "Yb3"))
+    candidate_ions = if haskey(ff, "candidate_ions")
+        String.(ff["candidate_ions"])
+    else
+        unique(String[ion, replace(ion, "+"=>""), "Yb3", "Yb3+"])
+    end
+
+    manual_include_j2 = Bool(get(ff, "manual_include_j2", get(ff, "include_j2", true)))
+    manual_c2 = Float64(get(ff, "manual_j2_coefficient", get(ff, "j2_coefficient", 0.75)))
+    manual_apply_as = Symbol(get(ff, "manual_apply_as", get(ff, "apply_as", "intensity_squared")))
+
+    on_error = Symbol(get(ff, "on_error", "error"))
+    normalize_to = Symbol(get(ff, "normalize_to", "absolute_Q"))
+
+    return (; enabled, source, ion, candidate_ions,
+        include_j2=manual_include_j2, c2=manual_c2, apply_as=manual_apply_as,
+        on_error, normalize_to)
+end
+
+function sv_builtin_formfactor_pairs(controls::Dict)
+    ff = sv_form_factor_controls(controls)
+    if !ff.enabled || ff.source != :sunny_builtin
+        return nothing
+    end
+
+    last_err = nothing
+    for ion in ff.candidate_ions
+        try
+            return [1 => FormFactor(ion)]
+        catch err
+            last_err = err
+        end
+    end
+
+    msg = "Could not construct Sunny FormFactor for candidate ion labels $(ff.candidate_ions). " *
+          "Try changing [neutron_form_factor].ion / candidate_ions in configs/sunny_validation_controls.toml."
+    if ff.on_error in (:none, :off, :disable, :warn_disable)
+        @warn msg exception=last_err
+        return nothing
+    else
+        error(msg * " Last error: $(last_err)")
+    end
+end
+
+function sv_sunny_measure(sys, controls::Dict)
+    # The preferred path is Sunny-native form factors inside ssf_perp. This lets
+    # Sunny handle the neutron measurement convention and prevents manual
+    # |f(Q)|^2 double counting.
+    pairs = sv_builtin_formfactor_pairs(controls)
+    if pairs === nothing
+        return ssf_perp(sys)
+    else
+        return ssf_perp(sys; formfactors=pairs)
+    end
+end
+
+function sv_form_factor_lattice_controls(controls::Dict)
+    ff = get(controls, "neutron_form_factor", Dict{String,Any}())
+    lat = ff isa Dict ? get(ff, "lattice", Dict{String,Any}()) : Dict{String,Any}()
+    lat isa Dict || (lat = Dict{String,Any}())
+    common = get(controls, "common", Dict{String,Any}())
+    a = Float64(get(lat, "a_A", get(common, "lattice_a_angstrom", 3.376)))
+    c = Float64(get(lat, "c_A", get(common, "lattice_c_angstrom", 21.96)))
+    gamma_deg = Float64(get(lat, "gamma_deg", 120.0))
+    if abs(gamma_deg - 120.0) > 1e-6
+        @warn "Sunny validation form-factor Q conversion currently assumes the analytical hexagonal/triangular gamma=120 convention" gamma_deg
+    end
+    return (; a_A=a, c_A=c, gamma_deg)
+end
+
+function sv_rlu_basis_matrix_for_form_factor(controls::Dict)
+    lat = sv_form_factor_lattice_controls(controls)
+    astar = 4.0 * pi / (sqrt(3.0) * lat.a_A)
+    cstar = 2.0 * pi / lat.c_A
+
+    # Same reciprocal basis as the analytical model:
+    # Q = H a* + K b* + L c*, with a* and b* 120-degree hex/triangular duals.
+    b1 = [ astar, 0.0, 0.0 ]
+    b2 = [ -0.5 * astar, 0.5 * sqrt(3.0) * astar, 0.0 ]
+    b3 = [ 0.0, 0.0, cstar ]
+    return hcat(b1, b2, b3)
+end
+
+function sv_qcart_Ainv(q_hkl::AbstractVector{<:Real}, controls::Dict)
+    Bmat = sv_rlu_basis_matrix_for_form_factor(controls)
+    return Bmat * collect(Float64, q_hkl)
+end
+
+function sv_qmag_Ainv(q_hkl::AbstractVector{<:Real}, controls::Dict)
+    return norm(sv_qcart_Ainv(q_hkl, controls))
+end
+
+function sv_form_factor_amplitude(q_hkl::AbstractVector{<:Real}, controls::Dict)
+    ff = sv_form_factor_controls(controls)
+    if !ff.enabled
+        return 1.0
+    elseif ff.source == :sunny_builtin
+        # Sunny applies the form factor internally through ssf_perp(; formfactors).
+        # Return unity here so diagnostics/CSV columns do not imply an additional
+        # post-processing weight. Use source="manual_yb3" to print/apply this
+        # analytical fallback explicitly.
+        return 1.0
+    elseif ff.source != :manual_yb3
+        @warn "Unsupported neutron_form_factor source; using no manual post-factor" source=ff.source
+        return 1.0
+    end
+
+    ion_norm = lowercase(replace(ff.ion, " "=>""))
+    if !(ion_norm in ("yb3+", "yb3", "ybiii"))
+        @warn "Unsupported manual neutron_form_factor ion; using no form factor" ion=ff.ion
+        return 1.0
+    end
+    Q = sv_qmag_Ainv(q_hkl, controls)
+    return sv_yb3_form_factor(Q; include_j2=ff.include_j2, c2=ff.c2)
+end
+
+function sv_form_factor_intensity_weight(q_hkl::AbstractVector{<:Real}, controls::Dict)
+    ff = sv_form_factor_controls(controls)
+    (!ff.enabled || ff.source == :sunny_builtin) && return 1.0
+    f = sv_form_factor_amplitude(q_hkl, controls)
+    if ff.apply_as == :intensity_squared
+        return f^2
+    elseif ff.apply_as == :amplitude
+        return f
+    elseif ff.apply_as == :none
+        return 1.0
+    else
+        error("Unsupported [neutron_form_factor].manual_apply_as=$(ff.apply_as). Use intensity_squared, amplitude, or none.")
+    end
+end
+
+function sv_apply_form_factor_to_intensity(I::AbstractMatrix, qs::Vector{Vector{Float64}}, controls::Dict)
+    ff = sv_form_factor_controls(controls)
+    size(I, 2) == length(qs) || error("Form factor application expected $(length(qs)) q columns but intensity has $(size(I,2))")
+
+    # Always compute |Q| for diagnostics/CSV output.  For source = sunny_builtin,
+    # Sunny applies the magnetic form factor inside ssf_perp(; formfactors), so
+    # there is no additional post-processing weight here.  For source =
+    # manual_yb3, apply the manual factor as a fallback.
+    qmag = [sv_qmag_Ainv(q, controls) for q in qs]
+
+    if !ff.enabled || ff.source == :sunny_builtin
+        return Matrix{Float64}(I), ones(Float64, length(qs)), ones(Float64, length(qs)), qmag
+    end
+
+    amps = [sv_form_factor_amplitude(q, controls) for q in qs]
+    weights = [sv_form_factor_intensity_weight(q, controls) for q in qs]
+    out = Matrix{Float64}(I)
+    for iq in 1:length(qs)
+        out[:, iq] .*= weights[iq]
+    end
+    return out, weights, amps, qmag
+end
+
 function sv_try_pkgversion(mod)
     try
         return string(pkgversion(mod))
@@ -1502,11 +1698,11 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
     qs = [q]
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
-    swt = SpinWaveTheoryKPM(sys; measure=ssf_perp(sys), tol=Float64(kc["tol"]))
+    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=Float64(kc["tol"]))
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
 
-    I = if raw isa AbstractVector
+    I_pre_manual = if raw isa AbstractVector
         Float64.(raw)
     elseif raw isa AbstractMatrix
         # Common Sunny layouts are (nq, nE) or (nE, nq).  Since we supply one
@@ -1523,13 +1719,25 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
         error("Unsupported Sunny intensity container type: $(typeof(raw))")
     end
 
-    if length(I) != length(energies)
+    if length(I_pre_manual) != length(energies)
         tmp = fill(NaN, length(energies))
-        n = min(length(I), length(energies))
-        tmp[1:n] .= I[1:n]
-        I = tmp
+        n = min(length(I_pre_manual), length(energies))
+        tmp[1:n] .= I_pre_manual[1:n]
+        I_pre_manual = tmp
     end
-    return (; energy_meV=energies, intensity=I, result=res)
+
+    Imat = reshape(I_pre_manual, length(energies), 1)
+    Ipost, form_factor_weight, form_factor_amplitude, qmag_Ainv = sv_apply_form_factor_to_intensity(Imat, qs, controls)
+    return (;
+        energy_meV = energies,
+        intensity = vec(Ipost[:, 1]),
+        intensity_pre_manual_form_factor = I_pre_manual,
+        result = res,
+        q = q,
+        form_factor_weight = form_factor_weight[1],
+        form_factor_amplitude = form_factor_amplitude[1],
+        qmag_Ainv = qmag_Ainv[1],
+    )
 end
 
 
@@ -1685,7 +1893,9 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
     flat_to_dispersive_fraction = sv_second_kernel_weight(params, controls)
 
-    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts)
+    ffctl = sv_form_factor_controls(controls)
+    fflat = sv_form_factor_lattice_controls(controls)
+    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts) form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     # First compute all unscaled Sunny spectra on the experimental energy grids.
     # The neutron intensity scale can then be either fixed, fitted globally, or
@@ -1711,6 +1921,10 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
                 Idisp_grid = Idisp_grid,
                 Iflat_grid = Iflat_grid,
                 Itotal_unscaled = Itotal_unscaled,
+                q_center = disp.q,
+                qmag_Ainv = disp.qmag_Ainv,
+                form_factor_weight = disp.form_factor_weight,
+                form_factor_amplitude = disp.form_factor_amplitude,
             ))
         end
     end
@@ -1746,7 +1960,7 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
 
         csv_path = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT_vs_exp.csv", r.qtag, r.B_T))
         sv_write_xy_csv(csv_path,
-            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z",
+            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,form_factor_enabled,form_factor_source,form_factor_ion,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z",
             cut.energy_meV,
             cut.intensity,
             cut.error,
@@ -1759,6 +1973,15 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
             residual,
             cut.raw_intensity,
             cut.background,
+            fill(r.q_center[1], length(cut.energy_meV)),
+            fill(r.q_center[2], length(cut.energy_meV)),
+            fill(r.q_center[3], length(cut.energy_meV)),
+            fill(r.qmag_Ainv, length(cut.energy_meV)),
+            fill(r.form_factor_amplitude, length(cut.energy_meV)),
+            fill(r.form_factor_weight, length(cut.energy_meV)),
+            fill(ffctl.enabled, length(cut.energy_meV)),
+            fill(String(ffctl.source), length(cut.energy_meV)),
+            fill(ffctl.ion, length(cut.energy_meV)),
             fill(neutron_scale, length(cut.energy_meV)),
             fill(String(scale_mode), length(cut.energy_meV)),
             fill(String(scale_scope), length(cut.energy_meV)),
@@ -2008,7 +2231,9 @@ function sv_kpm_component_spectra_for_qs_qaveraged(params, controls::Dict; compo
     qflat = sv_expand_qs_for_q_averaging(qs, qavg)
     spec = sv_kpm_component_spectra_for_qs(params, controls; component, field_T, qs=qflat)
     Iavg = sv_average_qsampled_intensity(spec.intensity, length(qs), qavg)
-    return (; energy_meV=spec.energy_meV, intensity=Iavg, result=spec.result, q_averaging=qavg, n_q_centers=length(qs), n_q_evaluated=length(qflat))
+    return (; energy_meV=spec.energy_meV, intensity=Iavg, result=spec.result,
+        form_factor_weight=spec.form_factor_weight, form_factor_amplitude=spec.form_factor_amplitude, qmag_Ainv=spec.qmag_Ainv,
+        q_averaging=qavg, n_q_centers=length(qs), n_q_evaluated=length(qflat))
 end
 
 function sv_q_path_from_tags(qtags::Vector{String}; n_per_segment::Integer=41)
@@ -2104,11 +2329,13 @@ function sv_kpm_component_spectra_for_qs(params, controls::Dict; component::Symb
 
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
-    swt = SpinWaveTheoryKPM(sys; measure=ssf_perp(sys), tol=Float64(kc["tol"]))
+    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=Float64(kc["tol"]))
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
-    I = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))
-    return (; energy_meV=energies, intensity=I, result=res)
+    I0 = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))
+    I, form_factor_weight, form_factor_amplitude, qmag_Ainv = sv_apply_form_factor_to_intensity(I0, qs, controls)
+    return (; energy_meV=energies, intensity=I, intensity_no_form_factor=I0, result=res,
+        form_factor_weight, form_factor_amplitude, qmag_Ainv)
 end
 
 function sv_kpm_2d_neutron_scale(params, controls::Dict)
@@ -2393,7 +2620,9 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
     qavg = sv_kpm_2d_q_average_offsets(k2)
 
-    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L
+    ffctl = sv_form_factor_controls(controls)
+    fflat = sv_form_factor_lattice_controls(controls)
+    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     raw_models = Dict{Float64,Any}()
     model_on_scan_grid = Dict{Float64,Matrix{Float64}}()
@@ -2462,11 +2691,15 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
         tag = @sprintf("%gT_leg%d", B, leg)
         csv_path = joinpath(out_table_dir, "sunny_kpm_2d_data_model_$(tag).csv")
         sv_write_xy_csv(csv_path,
-            "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,neutron_scale_mode,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy,q_average_enabled,q_average_n_samples,q_average_sigma_H_rlu,q_average_sigma_K_rlu,q_average_sigma_L_rlu",
-            q_index, path_coordinate, qx, qy, qz, energy_col,
+            "q_index,path_coordinate,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,neutron_scale_mode,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy,q_average_enabled,q_average_n_samples,q_average_sigma_H_rlu,q_average_sigma_K_rlu,q_average_sigma_L_rlu,form_factor_enabled",
+            q_index, path_coordinate, qx, qy, qz,
+            vcat([fill(sv_qmag_Ainv(m.qs[iq], controls), nE) for iq in 1:nq]...),
+            vcat([fill(sv_form_factor_amplitude(m.qs[iq], controls), nE) for iq in 1:nq]...),
+            vcat([fill(sv_form_factor_intensity_weight(m.qs[iq], controls), nE) for iq in 1:nq]...),
+            energy_col,
             total_scaled, disp_scaled, flat_scaled, total_unscaled, disp_unscaled, flat_unweighted,
             fill(scale, rows), fill(String(scale_mode), rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows),
-            fill(qavg.enabled, rows), fill(qavg.n_samples, rows), fill(qavg.sigma_H, rows), fill(qavg.sigma_K, rows), fill(qavg.sigma_L, rows),
+            fill(qavg.enabled, rows), fill(qavg.n_samples, rows), fill(qavg.sigma_H, rows), fill(qavg.sigma_K, rows), fill(qavg.sigma_L, rows), fill(ffctl.enabled, rows),
         )
         csv_paths[B] = csv_path
     end
@@ -2476,7 +2709,8 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     ncols = length(fields_have)
     fig = Figure(size=(1180, 850), fontsize=16)
     qavg_label = qavg.enabled ? string(", Q-avg ", qavg.n_samples, " samples") : ", path centers"
-    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K%s", leg, qavg_label), fontsize=21, font=:bold, tellwidth=false)
+    ff_label = ffctl.enabled ? ", Yb³⁺ |f(Q)|²" : ""
+    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K%s%s", leg, qavg_label, ff_label), fontsize=21, font=:bold, tellwidth=false)
 
     energy_ylim = Float64.(get(k2, "energy_ylim_meV", [0.20, 3.20]))
     xlim = haskey(k2, "xlim") ? Float64.(k2["xlim"]) : nothing
@@ -2560,7 +2794,9 @@ function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_cont
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
     qavg = sv_kpm_2d_q_average_offsets(k2)
 
-    @info "KPM 2D convention" B_T=B qtags flat_to_dispersive_fraction flat_weight neutron_scale sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size n_q=length(pathinfo.qs) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L
+    ffctl = sv_form_factor_controls(controls)
+    fflat = sv_form_factor_lattice_controls(controls)
+    @info "KPM 2D convention" B_T=B qtags flat_to_dispersive_fraction flat_weight neutron_scale sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size n_q=length(pathinfo.qs) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     @info "Computing 2D dispersive KPM map" B_T=B n_q=length(pathinfo.qs) n_q_evaluated=length(pathinfo.qs)*qavg.n_samples
     disp = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:dispersive, field_T=B, qs=pathinfo.qs, qavg=qavg)
@@ -2607,10 +2843,14 @@ function sv_run_kpm_2d_path_map(repo_root::AbstractString; controls=sv_load_cont
     end
 
     sv_write_xy_csv(csv_path,
-        "q_index,path_coordinate,qx,qy,qz,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy",
-        q_index, path_coordinate, qx, qy, qz, energy_col,
+        "q_index,path_coordinate,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,energy_meV,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,neutron_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_transverse_gxy,form_factor_enabled",
+        q_index, path_coordinate, qx, qy, qz,
+        vcat([fill(sv_qmag_Ainv(pathinfo.qs[iq], controls), nE) for iq in 1:nq]...),
+        vcat([fill(sv_form_factor_amplitude(pathinfo.qs[iq], controls), nE) for iq in 1:nq]...),
+        vcat([fill(sv_form_factor_intensity_weight(pathinfo.qs[iq], controls), nE) for iq in 1:nq]...),
+        energy_col,
         total_scaled_col, disp_scaled_col, flat_scaled_col, total_unscaled_col, disp_unscaled_col, flat_unweighted_col,
-        fill(neutron_scale, rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows)
+        fill(neutron_scale, rows), fill(flat_weight, rows), fill(flat_to_dispersive_fraction, rows), fill(params.gperp_ratio, rows), fill(sunny_transverse_gxy, rows), fill(ffctl.enabled, rows)
     )
 
     z_mode = Symbol(get(k2, "z_mode", "linear"))

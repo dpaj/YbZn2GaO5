@@ -110,126 +110,62 @@ I_total = neutron_scale * (I_disp_Sunny + r2 * gperp_ratio^2 * I_flat_Sunny)
 
 Changing `sunny_transverse_gxy` should therefore be treated as a calculator/debug convention.  It should not be reported as a refined material g-factor.
 
-## Sunny finite-size controls
+## Yb3+ magnetic form factor in Sunny KPM
 
-Sunny system size is treated as an extrinsic calculator setting, not as a fitted physical parameter.  It is controlled in `configs/sunny_validation_controls.toml`.
+The Sunny KPM neutron validation now prefers Sunny's built-in magnetic form-factor machinery.  Both the 1D KPM comparison and the 2D KPM maps construct their neutron measurement through the same shared helper, so the form-factor setting applies to both routes.  The form factor is passed into the neutron measurement object, rather than being applied afterward as a manual `|f(Q)|^2` multiplier:
 
-For the large-cell magnetization validation:
+```julia
+formfactors = [1 => FormFactor("Yb3")]
+measure = ssf_perp(sys; formfactors)
+swt = SpinWaveTheoryKPM(sys; measure, ...)
+```
+
+The control is:
 
 ```toml
-[largecell]
-system_size = [4, 4, 1]
-dims = [4, 4, 1]
-repeat_factor = [1, 1, 1]
+[neutron_form_factor]
+enabled = true
+source = "sunny_builtin"
+ion = "Yb3"
+candidate_ions = ["Yb3", "Yb3+"]
+on_error = "error"
 ```
 
-For the KPM neutron validation:
+This matches Sunny's documented usage pattern, where the tutorial example constructs the neutron measurement with `formfactors = [1 => FormFactor("Co2")]` and then calls `ssf_perp(sys; formfactors)`.  Keeping the form factor inside `ssf_perp` is cleaner than manually multiplying a final intensity map, and it avoids accidentally double counting the magnetic form factor.
+
+The previous analytical/manual Yb3+ form-factor implementation is retained only as a diagnostic fallback:
 
 ```toml
-[kpm]
-system_size = [12, 12, 1]
-dims = [3, 3, 1]
-repeat_factor = [4, 4, 1]
+source = "manual_yb3"
+manual_include_j2 = true
+manual_j2_coefficient = 0.75
+manual_apply_as = "intensity_squared"
 ```
 
-`system_size` is the final finite Sunny supercell used for the calculation.  `dims` is the seed Sunny system constructed before `repeat_periodically`.  When `system_size` is present, the validation code derives
-
-```text
-repeat_factor = system_size ./ dims
-```
-
-and checks consistency with any explicitly supplied `repeat_factor`.
-
-## Flat/dispersive S=1/2 fraction
-
-The best-fit relative flat-component fraction is stored in the canonical best-fit file:
+For normal Sunny KPM validation, leave `source = "sunny_builtin"`.  The physical reciprocal metric below is used only by the manual fallback and the diagnostic script's printed `|Q|` values:
 
 ```toml
-[neutron_extrinsic]
-second_kernel_relative_intensity = 0.1579822309
+[neutron_form_factor.lattice]
+a_A = 3.376
+c_A = 21.96
+gamma_deg = 120.0
 ```
 
-The historical name `second_kernel_relative_intensity` means the best-fit relative weight of the nondispersive flat S=1/2 component compared with the dispersive component.  In the Sunny validation controls this is selected by:
-
-```toml
-[weights]
-use_second_kernel_relative_intensity_from_best_fit = true
-manual_second_kernel_relative_intensity = 0.1579822309
-```
-
-The CSV outputs now include both names where relevant:
-
-```text
-second_kernel_weight
-flat_to_dispersive_fraction
-```
-
-For the neutron KPM comparison, the model still uses the effective transverse-intensity convention:
-
-```text
-I_total = neutron_scale * (I_disp_Sunny + flat_weight * I_flat_Sunny)
-flat_weight = flat_to_dispersive_fraction * gperp_ratio^2
-```
-
-This keeps the fitted population/weight fraction distinct from the effective neutron matrix-element ratio.
-
-
-## Parameter-mapping check
-
-To verify that Sunny is using the same canonical parameter set as the analytical
-co-fit, run:
+The helper script
 
 ```powershell
-julia --project=. scripts/check_sunny_parameter_mapping.jl
+julia --project=. scripts/check_sunny_form_factor.jl
 ```
 
-This prints and writes:
+verifies that the Sunny built-in form-factor label can be constructed and prints the manual fallback `|Q|`, `f(Q)`, and `|f(Q)|^2` values at Γ, K, M, Γ1, and K1 for a quick sanity check.
 
-```text
-results/feature_tables/sunny_validation/sunny_parameter_mapping.csv
+
+### 1D / 2D consistency note
+
+The 1D and 2D KPM paths should not call `ssf_perp(sys)` directly.  They should call the shared Sunny-validation helper that chooses either:
+
+```julia
+ssf_perp(sys; formfactors=[1 => FormFactor("Yb3")])
 ```
 
-The important convention is:
-
-```text
-dispersive Sunny component:
-    gzz, J1_meV, J2_meV, sigma_gzz, sigma_J
-
-flat Sunny component:
-    gzz2, sigma_gzz2, J1 = J2 = 0
-
-neutron flat weight:
-    flat_weight = second_kernel_relative_intensity * gperp_ratio^2
-```
-
-The Sunny transverse `gxy` is an intensity gauge required by `ssf_perp`; it is
-not the fitted physical `gperp`.
-
-## Sunny KPM 2D path map
-
-A model-only 2D KPM map can be generated with:
-
-```powershell
-julia --project=. scripts/sunny_plot_kpm_2d.jl
-```
-
-The q path and field are controlled by:
-
-```toml
-[kpm_2d]
-field_T = 9.0
-qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
-n_per_segment = 41
-neutron_scale_mode = "best_fit"
-z_mode = "linear"
-```
-
-This writes:
-
-```text
-results/figures/sunny_validation/sunny_kpm_2d_path_9T.png
-results/feature_tables/sunny_validation/sunny_kpm_2d_path_9T.csv
-```
-
-The 2D map is a Sunny model calculation only.  It does not yet overlay the
-experimental 2D CNCS data or apply a fitted experimental 2D scale.
+or, for diagnostics only, the no-form-factor or manual-fallback route.  The 1D CSV output now records the q center, `|Q|`, form-factor source, and form-factor diagnostic columns so that accidental divergence between the 1D and 2D routes is easier to catch.
