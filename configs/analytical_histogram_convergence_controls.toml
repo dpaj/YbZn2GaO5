@@ -1,0 +1,38 @@
+# configs/analytical_histogram_convergence_controls.toml
+#
+# Controls for scripts/check_analytical_histogram_convergence.jl.
+# This script reruns the analytical neutron model at fixed best-fit parameters
+# for several 1D histogram/event sample counts.  It is intended to determine
+# how many Q/disorder/event samples are needed before the analytical
+# histogramming result stops changing appreciably.  The result can then guide
+# expensive Sunny KPM histogram sample counts.
+
+[output]
+table_subdir = "results/feature_tables/analytical_histogram_convergence"
+figure_subdir = "results/figures/analytical_histogram_convergence"
+
+[sampling]
+# Sample counts are per field/qtag cut and per model component.
+# Each count runs both the dispersive and nondispersive kernels.
+sample_counts = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]
+reference_n_samples = 500000
+seed = 2026
+
+[model]
+S = 0.5
+J_units = "fractional"
+correlate_J1_J2 = false
+use_form_factor = true
+include_j2_formfactor = true
+include_kfki = true
+polarization = "transverse_c"
+
+[comparison]
+# Components to compare against the reference sample count.
+components = ["total", "dispersive", "flat"]
+
+[plotting]
+make_plots = true
+display_figures = false
+# Overlay these sample counts against the reference in the diagnostic 1D plot.
+overlay_sample_counts = [1000, 5000, 20000, 100000, 500000]
