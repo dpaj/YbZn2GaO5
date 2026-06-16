@@ -980,6 +980,13 @@ struct SVNeutronCut1D
     background::Vector{Float64}
     background_level::Float64
     data_mode::Symbol
+    # Nominal scan coordinates from the CNCS 1D scan file.  These are carried
+    # through so Sunny can optionally evaluate finite-Q-averaged spectra around
+    # the same measured Q used by the experimental cut rather than only the
+    # qtag lookup center.
+    H::Vector{Float64}
+    K::Vector{Float64}
+    L::Vector{Float64}
 end
 
 function sv_parse_filename_number_token(tok::AbstractString)
@@ -1430,6 +1437,9 @@ function sv_make_corrected_cut(raw::SVRawNeutronScan1D, bg::AbstractVector, cont
         mode == :raw || mode == :file_intensity ? zeros(Float64, length(raw.energy_meV)) : Float64.(bg),
         mode == :raw || mode == :file_intensity ? 0.0 : mean(Float64.(bg)),
         mode,
+        copy(raw.H),
+        copy(raw.K),
+        copy(raw.L),
     )
 end
 
@@ -1526,6 +1536,128 @@ function sv_energy_bin_edges(E::AbstractVector)
     return edges
 end
 
+# Generic bin-edge helper used for path-coordinate histogram sampling too.
+function sv_coordinate_bin_edges(x::AbstractVector)
+    n = length(x)
+    n >= 2 || error("Need at least two coordinate points to infer bin edges")
+    xs = Float64.(x)
+    edges = zeros(Float64, n + 1)
+    for i in 2:n
+        edges[i] = 0.5 * (xs[i-1] + xs[i])
+    end
+    edges[1] = xs[1] - 0.5 * (xs[2] - xs[1])
+    edges[end] = xs[end] + 0.5 * (xs[end] - xs[end-1])
+    return edges
+end
+
+function sv_lookup_nested_dict(d::Dict, keys::Vector{String}, default)
+    cur = d
+    for (i, key) in enumerate(keys)
+        if !(cur isa Dict) || !haskey(cur, key)
+            return default
+        end
+        if i == length(keys)
+            return cur[key]
+        end
+        cur = cur[key]
+    end
+    return default
+end
+
+function sv_energy_resolution_controls(controls::Dict; section::AbstractString="kpm_2d")
+    sec = get(controls, section, Dict{String,Any}())
+    er = sec isa Dict ? get(sec, "energy_resolution", Dict{String,Any}()) : Dict{String,Any}()
+    er isa Dict || (er = Dict{String,Any}())
+
+    enabled = Bool(get(er, "enabled", false))
+    mode = Symbol(get(er, "mode", "none"))
+    subtract_kpm_kernel = Bool(get(er, "subtract_kpm_kernel", true))
+    kernel_fwhm = Float64(get(get(controls, "kpm", Dict{String,Any}()), "kernel_fwhm_meV", 0.0))
+    min_sigma = Float64(get(er, "min_sigma_meV", 1e-6))
+
+    # First-pass CNCS Ei=4.65 meV tabulation used only for post-convolution.
+    # The values can be replaced by the analytical-model resolution function later.
+    table = if haskey(er, "fwhm_table_meV")
+        [Tuple(Float64.(row)) for row in er["fwhm_table_meV"]]
+    else
+        [(0.5, 0.155), (1.0, 0.136), (1.5, 0.116), (2.0, 0.098), (2.5, 0.083), (3.0, 0.070), (4.0, 0.055)]
+    end
+    sort!(table; by=x->x[1])
+    constant_fwhm = Float64(get(er, "constant_fwhm_meV", kernel_fwhm))
+    return (; enabled, mode, subtract_kpm_kernel, kernel_fwhm, min_sigma, table, constant_fwhm)
+end
+
+function sv_linear_interp_table(x::Real, table::Vector{Tuple{Float64,Float64}})
+    xx = Float64(x)
+    isempty(table) && return NaN
+    xx <= table[1][1] && return table[1][2]
+    xx >= table[end][1] && return table[end][2]
+    for i in 1:(length(table)-1)
+        x0, y0 = table[i]
+        x1, y1 = table[i+1]
+        if x0 <= xx <= x1
+            t = (xx - x0) / (x1 - x0)
+            return (1 - t) * y0 + t * y1
+        end
+    end
+    return table[end][2]
+end
+
+function sv_energy_resolution_sigma_meV(E::Real, er)
+    if !er.enabled || er.mode in (:none, :off, :disabled)
+        return 0.0
+    elseif er.mode in (:constant_fwhm, :constant)
+        fwhm_target = er.constant_fwhm
+    elseif er.mode in (:tabulated_fwhm, :cncs_tabulated, :analytical_like)
+        fwhm_target = sv_linear_interp_table(E, er.table)
+    else
+        error("Unsupported energy-resolution mode $(er.mode). Use none, constant_fwhm, or tabulated_fwhm.")
+    end
+
+    sigma_target = fwhm_target / 2.35482004503
+    if er.subtract_kpm_kernel
+        sigma_kpm = er.kernel_fwhm / 2.35482004503
+        sigma_target = sqrt(max(0.0, sigma_target^2 - sigma_kpm^2))
+    end
+    return max(er.min_sigma, sigma_target)
+end
+
+function sv_post_deposit_energy_resolution(E_model::AbstractVector{<:Real}, I_E_by_q::AbstractMatrix, E_target::AbstractVector{<:Real}, er)
+    # Deposit the native Sunny/KPM spectrum onto the displayed experimental
+    # energy-bin centers using a Gaussian kernel.  This is closer to the
+    # analytical event-histogrammer than direct interpolation.  The absolute
+    # normalization is not sacred here because the neutron scale is fitted; the
+    # important part is the line shape/width.
+    if !er.enabled || er.mode in (:none, :off, :disabled)
+        return nothing
+    end
+
+    Em = Float64.(E_model)
+    Et = Float64.(E_target)
+    nE, nq = size(I_E_by_q)
+    nE == length(Em) || error("Energy axis length mismatch in sv_post_deposit_energy_resolution")
+    out = zeros(Float64, length(Et), nq)
+
+    for (im, Etrue) in enumerate(Em)
+        sig = sv_energy_resolution_sigma_meV(Etrue, er)
+        if !(isfinite(sig) && sig > 0)
+            # Nearest-bin fallback.
+            j = argmin(abs.(Et .- Etrue))
+            out[j, :] .+= I_E_by_q[im, :]
+            continue
+        end
+        w = exp.(-0.5 .* ((Et .- Etrue) ./ sig).^2)
+        sw = sum(w)
+        if isfinite(sw) && sw > 0
+            w ./= sw
+            for j in eachindex(Et)
+                out[j, :] .+= w[j] .* I_E_by_q[im, :]
+            end
+        end
+    end
+    return out
+end
+
 function sv_model_to_experimental_energy_grid(
     E_model::AbstractVector,
     I_model::AbstractVector,
@@ -1561,6 +1693,23 @@ function sv_model_to_experimental_energy_grid(
     end
 end
 
+function sv_model_to_experimental_energy_grid_resolved(
+    E_model::AbstractVector,
+    I_model::AbstractVector,
+    E_exp::AbstractVector,
+    controls::Dict;
+    section::AbstractString="kpm",
+    mode::Symbol=:bin_average,
+)
+    er = sv_energy_resolution_controls(controls; section)
+    M = reshape(Float64.(I_model), length(I_model), 1)
+    deposited = sv_post_deposit_energy_resolution(E_model, M, E_exp, er)
+    if deposited !== nothing
+        return vec(deposited[:, 1])
+    end
+    return sv_model_to_experimental_energy_grid(E_model, I_model, E_exp; mode=mode)
+end
+
 function sv_neutron_scale(params, controls::Dict)
     kc = controls["kpm"]
     if get(kc, "use_neutron_global_scale_from_best_fit", true)
@@ -1584,7 +1733,7 @@ end
 function sv_write_neutron_cut_inventory(path::AbstractString, cuts::Vector{SVNeutronCut1D})
     mkpath(dirname(path))
     open(path, "w") do io
-        println(io, "path,Ei_meV,temperature_K,field_T,qtag,n_E,E_min_meV,E_max_meV,I_min,I_max,rawI_min,rawI_max,bg_min,bg_max,data_mode,background_mean")
+        println(io, "path,Ei_meV,temperature_K,field_T,qtag,n_E,E_min_meV,E_max_meV,I_min,I_max,rawI_min,rawI_max,bg_min,bg_max,data_mode,background_mean,H_mean,K_mean,L_mean,H_span,K_span,L_span")
         for c in cuts
             println(io, join([
                 c.path,
@@ -1603,6 +1752,12 @@ function sv_write_neutron_cut_inventory(path::AbstractString, cuts::Vector{SVNeu
                 maximum(c.background),
                 String(c.data_mode),
                 c.background_level,
+                mean(c.H),
+                mean(c.K),
+                mean(c.L),
+                maximum(c.H) - minimum(c.H),
+                maximum(c.K) - minimum(c.K),
+                maximum(c.L) - minimum(c.L),
             ], ","))
         end
     end
@@ -1673,7 +1828,84 @@ function sv_try_extract_sunny_intensity(res)
     error("Could not extract intensity array from Sunny result. propertynames(res) = $(propertynames(res))")
 end
 
-function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, field_T::Real, qtag::AbstractString)
+# -----------------------------------------------------------------------------
+# 1D Sunny KPM finite-Q averaging / experimental-cut histogram approximation
+# -----------------------------------------------------------------------------
+
+function sv_kpm_1d_q_averaging_controls(controls::Dict)
+    kc = get(controls, "kpm", Dict{String,Any}())
+    qa = get(kc, "q_averaging", Dict{String,Any}())
+    qa isa Dict || (qa = Dict{String,Any}())
+    enabled = Bool(get(qa, "enabled", false))
+    mode = Symbol(get(qa, "mode", "gaussian_grid"))
+    n_h = Int(get(qa, "n_h", get(qa, "n_H", 3)))
+    n_k = Int(get(qa, "n_k", get(qa, "n_K", 3)))
+    n_l = Int(get(qa, "n_l", get(qa, "n_L", 1)))
+    sigma_H = Float64(get(qa, "sigma_H_rlu", 0.0))
+    sigma_K = Float64(get(qa, "sigma_K_rlu", 0.0))
+    sigma_L = Float64(get(qa, "sigma_L_rlu", 0.0))
+    grid_nsigma = Float64(get(qa, "grid_nsigma", 1.5))
+    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma)
+end
+
+function sv_kpm_1d_experimental_histogram_controls(controls::Dict)
+    kc = get(controls, "kpm", Dict{String,Any}())
+    eh = get(kc, "experimental_histogram", Dict{String,Any}())
+    eh isa Dict || (eh = Dict{String,Any}())
+    enabled = Bool(get(eh, "enabled", false))
+    mode = Symbol(get(eh, "mode", "cut_center_plus_resolution_grid"))
+    use_scan_q_columns = Bool(get(eh, "use_scan_q_columns", true))
+    return (; enabled, mode, use_scan_q_columns)
+end
+
+function sv_kpm_1d_q_average_offsets(controls::Dict)
+    ctl = sv_kpm_1d_q_averaging_controls(controls)
+    if !ctl.enabled
+        return (; enabled=false, mode=ctl.mode, offsets=[[0.0, 0.0, 0.0]], weights=[1.0],
+            n_samples=1, sigma_H=ctl.sigma_H, sigma_K=ctl.sigma_K, sigma_L=ctl.sigma_L,
+            n_h=1, n_k=1, n_l=1, grid_nsigma=ctl.grid_nsigma)
+    end
+    ctl.mode == :gaussian_grid || error("Unsupported [kpm.q_averaging].mode=$(ctl.mode). Currently use gaussian_grid.")
+    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma)
+    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma)
+    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma)
+    offsets = Vector{Vector{Float64}}()
+    weights = Float64[]
+    for (ih, dh) in enumerate(hs), (ik, dk) in enumerate(ks), (il, dl) in enumerate(ls)
+        push!(offsets, [Float64(dh), Float64(dk), Float64(dl)])
+        push!(weights, wh[ih] * wk[ik] * wl[il])
+    end
+    sw = sum(weights)
+    if !(isfinite(sw) && sw > 0)
+        weights .= 1.0 / length(weights)
+    else
+        weights ./= sw
+    end
+    return (; enabled=true, mode=ctl.mode, offsets, weights, n_samples=length(weights),
+        sigma_H=ctl.sigma_H, sigma_K=ctl.sigma_K, sigma_L=ctl.sigma_L,
+        n_h=length(hs), n_k=length(ks), n_l=length(ls), grid_nsigma=ctl.grid_nsigma)
+end
+
+function sv_kpm_1d_q_center(cut::SVNeutronCut1D, controls::Dict)
+    eh = sv_kpm_1d_experimental_histogram_controls(controls)
+    if eh.enabled && eh.use_scan_q_columns && !isempty(cut.H)
+        return [mean(cut.H), mean(cut.K), mean(cut.L)]
+    else
+        return sv_qtag_to_q(cut.qtag)
+    end
+end
+
+function sv_kpm_1d_average_qsampled_intensity(I::AbstractMatrix, qavg)
+    nE, nq = size(I)
+    nq == qavg.n_samples || error("Expected $(qavg.n_samples) 1D q-sampled columns but got $nq")
+    out = zeros(Float64, nE)
+    for iq in 1:nq
+        out .+= qavg.weights[iq] .* I[:, iq]
+    end
+    return out
+end
+
+function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, field_T::Real, qtag::AbstractString, cut=nothing)
     kc = controls["kpm"]
     sizectl = sv_system_size_controls(controls, "kpm")
     dims = sizectl.dims
@@ -1694,52 +1926,36 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
     randomize_spins!(sys)
     minimize_energy!(sys; maxiters)
 
-    q = sv_qtag_to_q(qtag)
-    qs = [q]
+    q_center = cut === nothing ? sv_qtag_to_q(qtag) : sv_kpm_1d_q_center(cut, controls)
+    qavg = sv_kpm_1d_q_average_offsets(controls)
+    qs = [Float64.(q_center) .+ off for off in qavg.offsets]
+
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
     swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=Float64(kc["tol"]))
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
 
-    I_pre_manual = if raw isa AbstractVector
-        Float64.(raw)
-    elseif raw isa AbstractMatrix
-        # Common Sunny layouts are (nq, nE) or (nE, nq).  Since we supply one
-        # q-point, choose the orientation that matches the energy axis.
-        r, c = size(raw)
-        if r == length(energies)
-            vec(mean(Float64.(raw); dims=2))
-        elseif c == length(energies)
-            vec(mean(Float64.(raw); dims=1))
-        else
-            vec(Float64.(raw))[1:min(length(raw), length(energies))]
-        end
-    else
-        error("Unsupported Sunny intensity container type: $(typeof(raw))")
-    end
+    I0 = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))
+    Ipost, form_factor_weight, form_factor_amplitude, qmag_Ainv = sv_apply_form_factor_to_intensity(I0, qs, controls)
+    Iavg = sv_kpm_1d_average_qsampled_intensity(Ipost, qavg)
 
-    if length(I_pre_manual) != length(energies)
-        tmp = fill(NaN, length(energies))
-        n = min(length(I_pre_manual), length(energies))
-        tmp[1:n] .= I_pre_manual[1:n]
-        I_pre_manual = tmp
-    end
-
-    Imat = reshape(I_pre_manual, length(energies), 1)
-    Ipost, form_factor_weight, form_factor_amplitude, qmag_Ainv = sv_apply_form_factor_to_intensity(Imat, qs, controls)
     return (;
         energy_meV = energies,
-        intensity = vec(Ipost[:, 1]),
-        intensity_pre_manual_form_factor = I_pre_manual,
+        intensity = Iavg,
+        intensity_qsampled = Ipost,
+        intensity_no_form_factor = I0,
         result = res,
-        q = q,
-        form_factor_weight = form_factor_weight[1],
-        form_factor_amplitude = form_factor_amplitude[1],
-        qmag_Ainv = qmag_Ainv[1],
+        q = Float64.(q_center),
+        qs = qs,
+        q_average = qavg,
+        q_average_enabled = qavg.enabled,
+        q_samples = qavg.n_samples,
+        form_factor_weight = sum(qavg.weights .* form_factor_weight),
+        form_factor_amplitude = sum(qavg.weights .* form_factor_amplitude),
+        qmag_Ainv = sum(qavg.weights .* qmag_Ainv),
     )
 end
-
 
 function sv_kpm_neutron_scale_mode(controls::Dict)
     kc = controls["kpm"]
@@ -1895,7 +2111,10 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
 
     ffctl = sv_form_factor_controls(controls)
     fflat = sv_form_factor_lattice_controls(controls)
-    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts) form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
+    er1d = sv_energy_resolution_controls(controls; section="kpm")
+    qavg1d = sv_kpm_1d_q_average_offsets(controls)
+    eh1d = sv_kpm_1d_experimental_histogram_controls(controls)
+    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode energy_resolution_enabled=er1d.enabled energy_resolution_mode=er1d.mode energy_resolution_subtract_kpm_kernel=er1d.subtract_kpm_kernel q_average_enabled=qavg1d.enabled q_average_samples=qavg1d.n_samples sigma_H_rlu=qavg1d.sigma_H sigma_K_rlu=qavg1d.sigma_K sigma_L_rlu=qavg1d.sigma_L experimental_histogram_enabled=eh1d.enabled experimental_histogram_mode=eh1d.mode use_scan_q_columns=eh1d.use_scan_q_columns sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts) form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     # First compute all unscaled Sunny spectra on the experimental energy grids.
     # The neutron intensity scale can then be either fixed, fitted globally, or
@@ -1907,11 +2126,11 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
             cut === nothing && error("No experimental 1D cut found for B=$B T qtag=$qtag. Check kpm Ei/T/field/qtag controls.")
 
             @info "Computing Sunny KPM cut and histogramming to experiment" B_T=B qtag=qtag nE_exp=length(cut.energy_meV)
-            disp = sv_kpm_component_spectrum(params, controls; component=:dispersive, field_T=B, qtag)
-            flat = sv_kpm_component_spectrum(params, controls; component=:flat, field_T=B, qtag)
+            disp = sv_kpm_component_spectrum(params, controls; component=:dispersive, field_T=B, qtag, cut=cut)
+            flat = sv_kpm_component_spectrum(params, controls; component=:flat, field_T=B, qtag, cut=cut)
 
-            Idisp_grid = sv_model_to_experimental_energy_grid(disp.energy_meV, disp.intensity, cut.energy_meV; mode=hist_mode)
-            Iflat_grid = sv_model_to_experimental_energy_grid(flat.energy_meV, flat.intensity, cut.energy_meV; mode=hist_mode)
+            Idisp_grid = sv_model_to_experimental_energy_grid_resolved(disp.energy_meV, disp.intensity, cut.energy_meV, controls; section="kpm", mode=hist_mode)
+            Iflat_grid = sv_model_to_experimental_energy_grid_resolved(flat.energy_meV, flat.intensity, cut.energy_meV, controls; section="kpm", mode=hist_mode)
             Itotal_unscaled = Idisp_grid .+ flat_weight .* Iflat_grid
 
             push!(cut_results, (;
@@ -1925,6 +2144,14 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
                 qmag_Ainv = disp.qmag_Ainv,
                 form_factor_weight = disp.form_factor_weight,
                 form_factor_amplitude = disp.form_factor_amplitude,
+                q_average_enabled = disp.q_average_enabled,
+                q_samples = disp.q_samples,
+                q_sigma_H = disp.q_average.sigma_H,
+                q_sigma_K = disp.q_average.sigma_K,
+                q_sigma_L = disp.q_average.sigma_L,
+                experimental_histogram_enabled = eh1d.enabled,
+                experimental_histogram_mode = eh1d.mode,
+                use_scan_q_columns = eh1d.use_scan_q_columns,
             ))
         end
     end
@@ -1960,7 +2187,7 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
 
         csv_path = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT_vs_exp.csv", r.qtag, r.B_T))
         sv_write_xy_csv(csv_path,
-            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,form_factor_enabled,form_factor_source,form_factor_ion,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z",
+            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,form_factor_enabled,form_factor_source,form_factor_ion,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z,energy_resolution_enabled,energy_resolution_mode,energy_resolution_subtract_kpm_kernel,experimental_histogram_enabled,experimental_histogram_mode,use_scan_q_columns,q_average_enabled,q_samples,q_sigma_H_rlu,q_sigma_K_rlu,q_sigma_L_rlu",
             cut.energy_meV,
             cut.intensity,
             cut.error,
@@ -1998,6 +2225,17 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
             fill(kpm_sizectl.system_size[1], length(cut.energy_meV)),
             fill(kpm_sizectl.system_size[2], length(cut.energy_meV)),
             fill(kpm_sizectl.system_size[3], length(cut.energy_meV)),
+            fill(er1d.enabled, length(cut.energy_meV)),
+            fill(String(er1d.mode), length(cut.energy_meV)),
+            fill(er1d.subtract_kpm_kernel, length(cut.energy_meV)),
+            fill(r.experimental_histogram_enabled, length(cut.energy_meV)),
+            fill(String(r.experimental_histogram_mode), length(cut.energy_meV)),
+            fill(r.use_scan_q_columns, length(cut.energy_meV)),
+            fill(r.q_average_enabled, length(cut.energy_meV)),
+            fill(r.q_samples, length(cut.energy_meV)),
+            fill(r.q_sigma_H, length(cut.energy_meV)),
+            fill(r.q_sigma_K, length(cut.energy_meV)),
+            fill(r.q_sigma_L, length(cut.energy_meV)),
         )
         push!(all_rows, (; B_T=r.B_T, qtag=r.qtag, csv_path, neutron_scale))
     end
@@ -2225,6 +2463,101 @@ function sv_average_qsampled_intensity(Iflat::AbstractMatrix, nq::Integer, qavg)
         end
     end
     return out
+end
+
+function sv_path_subsample_axis(lo::Real, hi::Real, n::Integer)
+    n = Int(n)
+    if n <= 1 || hi <= lo
+        return ([0.5 * (Float64(lo) + Float64(hi))], [1.0])
+    end
+    xs = collect(range(Float64(lo), Float64(hi); length=n+2))[2:end-1]
+    ws = fill(1.0 / length(xs), length(xs))
+    return (xs, ws)
+end
+
+function sv_kpm_2d_experimental_histogram_controls(k2)
+    eh = get(k2, "experimental_histogram", Dict{String,Any}())
+    eh isa Dict || (eh = Dict{String,Any}())
+    enabled = Bool(get(eh, "enabled", false))
+    mode = Symbol(get(eh, "mode", "path_bin_plus_resolution_grid"))
+    n_path = Int(get(eh, "n_path", 3))
+    sample_path_bin = Bool(get(eh, "sample_path_bin", true))
+    return (; enabled, mode, n_path, sample_path_bin)
+end
+
+function sv_kpm_2d_q_sampler_from_scan(scan, k2; leg::Integer=1)
+    # Builds the Q cloud used by the Sunny 2D data/model comparison.
+    # Old behavior: one path-center Q plus optional Gaussian H/K offsets.
+    # New histogram-like behavior: sample the displayed path-coordinate bin too,
+    # then apply the same Gaussian Q-resolution offsets.
+    qavg = sv_kpm_2d_q_average_offsets(k2)
+    eh = sv_kpm_2d_experimental_histogram_controls(k2)
+    xedges = sv_coordinate_bin_edges(scan.x)
+
+    qs_center = sv_kpm_2d_oldpath_qs_from_x(scan.x; leg=leg)
+    qs_flat = Vector{Vector{Float64}}()
+    ranges = Vector{UnitRange{Int}}()
+    weights_by_center = Vector{Vector{Float64}}()
+
+    for ix in eachindex(scan.x)
+        start = length(qs_flat) + 1
+        local_weights = Float64[]
+
+        if eh.enabled && eh.sample_path_bin
+            us, wu = sv_path_subsample_axis(xedges[ix], xedges[ix+1], eh.n_path)
+        else
+            us, wu = ([Float64(scan.x[ix])], [1.0])
+        end
+
+        for (iu, u) in enumerate(us)
+            q_path = sv_kpm_2d_oldpath_qs_from_x([u]; leg=leg)[1]
+            for is in eachindex(qavg.offsets)
+                push!(qs_flat, Float64.(q_path) .+ qavg.offsets[is])
+                push!(local_weights, wu[iu] * qavg.weights[is])
+            end
+        end
+
+        sw = sum(local_weights)
+        if !(isfinite(sw) && sw > 0)
+            local_weights .= 1.0 / length(local_weights)
+        else
+            local_weights ./= sw
+        end
+        stop = length(qs_flat)
+        push!(ranges, start:stop)
+        push!(weights_by_center, local_weights)
+    end
+
+    n_samples = isempty(ranges) ? 0 : length(first(ranges))
+    return (; enabled=(qavg.enabled || eh.enabled), mode=eh.enabled ? eh.mode : qavg.mode,
+        qs_center, qs_flat, ranges, weights_by_center, n_samples, n_q_centers=length(qs_center),
+        q_average_enabled=qavg.enabled, experimental_histogram_enabled=eh.enabled,
+        sigma_H=qavg.sigma_H, sigma_K=qavg.sigma_K, sigma_L=qavg.sigma_L,
+        n_h=qavg.n_h, n_k=qavg.n_k, n_l=qavg.n_l, grid_nsigma=qavg.grid_nsigma,
+        path_n=eh.enabled && eh.sample_path_bin ? eh.n_path : 1)
+end
+
+function sv_average_qsampled_intensity_sampler(Iflat::AbstractMatrix, sampler)
+    nE, ncols = size(Iflat)
+    length(sampler.qs_flat) == ncols || error("Q sampler length $(length(sampler.qs_flat)) does not match intensity columns $ncols")
+    out = zeros(Float64, nE, length(sampler.ranges))
+    for iq in eachindex(sampler.ranges)
+        cols = sampler.ranges[iq]
+        ws = sampler.weights_by_center[iq]
+        length(cols) == length(ws) || error("Q sampler weight/range mismatch at iq=$iq")
+        for (j, col) in enumerate(cols)
+            out[:, iq] .+= ws[j] .* Iflat[:, col]
+        end
+    end
+    return out
+end
+
+function sv_kpm_component_spectra_for_qs_sampled(params, controls::Dict; component::Symbol, field_T::Real, sampler)
+    spec = sv_kpm_component_spectra_for_qs(params, controls; component, field_T, qs=sampler.qs_flat)
+    Iavg = sv_average_qsampled_intensity_sampler(spec.intensity, sampler)
+    return (; energy_meV=spec.energy_meV, intensity=Iavg, result=spec.result,
+        form_factor_weight=spec.form_factor_weight, form_factor_amplitude=spec.form_factor_amplitude, qmag_Ainv=spec.qmag_Ainv,
+        q_averaging=sampler, n_q_centers=length(sampler.qs_center), n_q_evaluated=length(sampler.qs_flat))
 end
 
 function sv_kpm_component_spectra_for_qs_qaveraged(params, controls::Dict; component::Symbol, field_T::Real, qs::Vector{Vector{Float64}}, qavg)
@@ -2546,9 +2879,19 @@ function sv_interp1_linear(x::AbstractVector{<:Real}, y::AbstractVector{<:Real},
     end
 end
 
-function sv_model_to_scan_energy_grid(model_E::AbstractVector{<:Real}, model_I_E_by_x::AbstractMatrix, scan::SVScan2DCompare)
+function sv_model_to_scan_energy_grid(model_E::AbstractVector{<:Real}, model_I_E_by_x::AbstractMatrix, scan::SVScan2DCompare; controls=nothing, section::AbstractString="kpm_2d")
     nE, nx = size(model_I_E_by_x)
     nx == length(scan.x) || error("Model q grid length $(nx) does not match scan x length $(length(scan.x))")
+
+    if controls !== nothing
+        er = sv_energy_resolution_controls(controls; section)
+        deposited = sv_post_deposit_energy_resolution(model_E, model_I_E_by_x, scan.e, er)
+        if deposited !== nothing
+            # deposited layout is (nE_target, nx); scan z layout is (nx, nE_target)
+            return permutedims(deposited)
+        end
+    end
+
     out = fill(NaN, length(scan.x), length(scan.e))
     for ix in eachindex(scan.x)
         col = view(model_I_E_by_x, :, ix)
@@ -2619,23 +2962,30 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     sunny_transverse_gxy = sv_sunny_transverse_gxy(controls)
     kpm_sizectl = sv_system_size_controls(controls, "kpm")
     qavg = sv_kpm_2d_q_average_offsets(k2)
+    ehctl = sv_kpm_2d_experimental_histogram_controls(k2)
+    erctl = sv_energy_resolution_controls(controls; section="kpm_2d")
 
     ffctl = sv_form_factor_controls(controls)
     fflat = sv_form_factor_lattice_controls(controls)
-    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
+    @info "KPM 2D data/model convention" fields leg flat_to_dispersive_fraction flat_weight reference_scale scale_mode sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples sigma_H_rlu=qavg.sigma_H sigma_K_rlu=qavg.sigma_K sigma_L_rlu=qavg.sigma_L experimental_histogram_enabled=ehctl.enabled path_bin_samples=ehctl.n_path energy_resolution_enabled=erctl.enabled energy_resolution_mode=erctl.mode energy_resolution_subtract_kpm_kernel=erctl.subtract_kpm_kernel form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     raw_models = Dict{Float64,Any}()
     model_on_scan_grid = Dict{Float64,Matrix{Float64}}()
+    disp_on_scan_grid = Dict{Float64,Matrix{Float64}}()
+    flat_on_scan_grid = Dict{Float64,Matrix{Float64}}()
     for B in fields
         haskey(scans, B) || continue
         scan = scans[B]
-        qs = sv_kpm_2d_oldpath_qs_from_x(scan.x; leg=leg)
-        @info "Computing Sunny KPM 2D map on experimental path" field_T=B leg n_q=length(qs) q_average_enabled=qavg.enabled q_average_samples=qavg.n_samples n_q_evaluated=length(qs)*qavg.n_samples
-        disp = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:dispersive, field_T=B, qs=qs, qavg=qavg)
-        flat = sv_kpm_component_spectra_for_qs_qaveraged(params, controls; component=:flat, field_T=B, qs=qs, qavg=qavg)
+        sampler = sv_kpm_2d_q_sampler_from_scan(scan, k2; leg=leg)
+        qs = sampler.qs_center
+        @info "Computing Sunny KPM 2D map on experimental histogram grid" field_T=B leg n_q=length(qs) q_average_enabled=sampler.q_average_enabled experimental_histogram_enabled=sampler.experimental_histogram_enabled q_samples_per_pixel=sampler.n_samples n_q_evaluated=length(sampler.qs_flat) energy_resolution_enabled=erctl.enabled energy_resolution_mode=erctl.mode
+        disp = sv_kpm_component_spectra_for_qs_sampled(params, controls; component=:dispersive, field_T=B, sampler=sampler)
+        flat = sv_kpm_component_spectra_for_qs_sampled(params, controls; component=:flat, field_T=B, sampler=sampler)
         Itotal_unscaled = disp.intensity .+ flat_weight .* flat.intensity
-        raw_models[B] = (; disp, flat, Itotal_unscaled, qs, q_averaging=qavg)
-        model_on_scan_grid[B] = sv_model_to_scan_energy_grid(disp.energy_meV, Itotal_unscaled, scan)
+        raw_models[B] = (; disp, flat, Itotal_unscaled, qs, q_averaging=sampler)
+        model_on_scan_grid[B] = sv_model_to_scan_energy_grid(disp.energy_meV, Itotal_unscaled, scan; controls=controls, section="kpm_2d")
+        disp_on_scan_grid[B] = sv_model_to_scan_energy_grid(disp.energy_meV, disp.intensity, scan; controls=controls, section="kpm_2d")
+        flat_on_scan_grid[B] = sv_model_to_scan_energy_grid(flat.energy_meV, flat.intensity, scan; controls=controls, section="kpm_2d")
     end
 
     scale_by_field = Dict{Float64,Float64}()
@@ -2702,15 +3052,40 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
             fill(qavg.enabled, rows), fill(qavg.n_samples, rows), fill(qavg.sigma_H, rows), fill(qavg.sigma_K, rows), fill(qavg.sigma_L, rows), fill(ffctl.enabled, rows),
         )
         csv_paths[B] = csv_path
+
+        # Also save the model after deposition/interpolation onto the experimental
+        # scan grid.  This is the grid used for scaling and plotting when
+        # [kpm_2d.energy_resolution] is enabled.
+        scan_csv_path = joinpath(out_table_dir, "sunny_kpm_2d_data_model_$(tag)_scan_grid.csv")
+        q_index2 = Int[]; x2 = Float64[]; e2 = Float64[]; qx2 = Float64[]; qy2 = Float64[]; qz2 = Float64[]
+        itot2 = Float64[]; idisp2 = Float64[]; iflat2 = Float64[]; data2 = Float64[]
+        for iq in 1:nq
+            q = m.qs[iq]
+            for ie in eachindex(scan.e)
+                push!(q_index2, iq); push!(x2, scan.x[iq]); push!(e2, scan.e[ie]); push!(qx2, q[1]); push!(qy2, q[2]); push!(qz2, q[3])
+                push!(itot2, scale * model_on_scan_grid[B][iq, ie])
+                push!(idisp2, scale * disp_on_scan_grid[B][iq, ie])
+                push!(iflat2, scale * flat_weight * flat_on_scan_grid[B][iq, ie])
+                push!(data2, scan.z[iq, ie])
+            end
+        end
+        nrows2 = length(e2)
+        sv_write_xy_csv(scan_csv_path,
+            "q_index,path_coordinate,qx,qy,qz,energy_meV,I_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,neutron_scale,neutron_scale_mode,experimental_histogram_enabled,path_bin_samples,q_samples_per_pixel,energy_resolution_enabled,energy_resolution_mode,energy_resolution_subtract_kpm_kernel",
+            q_index2, x2, qx2, qy2, qz2, e2, data2, itot2, idisp2, iflat2,
+            fill(scale, nrows2), fill(String(scale_mode), nrows2), fill(m.q_averaging.experimental_histogram_enabled, nrows2), fill(m.q_averaging.path_n, nrows2), fill(m.q_averaging.n_samples, nrows2),
+            fill(erctl.enabled, nrows2), fill(String(erctl.mode), nrows2), fill(erctl.subtract_kpm_kernel, nrows2))
     end
 
     # Linear-intensity, 2-row style matching the analytical 2D data/model plot.
     fields_have = sort(collect(keys(raw_models)))
     ncols = length(fields_have)
     fig = Figure(size=(1180, 850), fontsize=16)
-    qavg_label = qavg.enabled ? string(", Q-avg ", qavg.n_samples, " samples") : ", path centers"
+    qavg_label = qavg.enabled ? string(", Q-avg ", qavg.n_samples, " offsets") : ", path centers"
+    eh_label = ehctl.enabled ? string(", path-bin ×", ehctl.n_path) : ""
+    er_label = erctl.enabled ? string(", E-res ", erctl.mode) : ""
     ff_label = ffctl.enabled ? ", Yb³⁺ |f(Q)|²" : ""
-    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K%s%s", leg, qavg_label, ff_label), fontsize=21, font=:bold, tellwidth=false)
+    Label(fig[0, 1:(ncols+1)], @sprintf("YZGO 2D data vs Sunny KPM model, leg %d, Ei=4.65 meV, T=0.07 K%s%s%s%s", leg, qavg_label, eh_label, er_label, ff_label), fontsize=21, font=:bold, tellwidth=false)
 
     energy_ylim = Float64.(get(k2, "energy_ylim_meV", [0.20, 3.20]))
     xlim = haskey(k2, "xlim") ? Float64.(k2["xlim"]) : nothing
@@ -2719,7 +3094,7 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
         emax=Float64(get(k2, "data_color_energy_max_meV", Inf)),
         high_quantile=Float64(get(k2, "data_clip_high_quantile", 0.95)),
     )
-    model_arrays = [permutedims(scale_by_field[B] .* raw_models[B].Itotal_unscaled) for B in fields_have]
+    model_arrays = [scale_by_field[B] .* model_on_scan_grid[B] for B in fields_have]
     model_cr = sv_robust_colorrange_2d(model_arrays; high_quantile=Float64(get(k2, "model_clip_high_quantile", 0.995)))
     cmap = Symbol(get(k2, "colormap", "viridis"))
     guides = sv_kpm_2d_plot_guides(k2)
@@ -2730,7 +3105,7 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
     for (icol, B) in enumerate(fields_have)
         scan = scans[B]
         m = raw_models[B]
-        zmodel = scale_by_field[B] .* m.Itotal_unscaled
+        zmodel = scale_by_field[B] .* model_on_scan_grid[B]
 
         axd = Axis(fig[1, icol], title=@sprintf("%g T", B), ylabel=icol == 1 ? "Data\nΔE (meV)" : "", xlabel="")
         data_hm = heatmap!(axd, scan.x, scan.e, scan.z; colormap=cmap, colorrange=data_cr, nan_color=:lightgray)
@@ -2740,7 +3115,7 @@ function sv_run_kpm_2d_data_model_comparison(repo_root::AbstractString; controls
         axd.xticks = xticks
 
         axm = Axis(fig[2, icol], title=@sprintf("scale = %.4g", scale_by_field[B]), ylabel=icol == 1 ? "Sunny KPM\nΔE (meV)" : "", xlabel=scan.xlabel)
-        model_hm = heatmap!(axm, scan.x, m.disp.energy_meV, permutedims(zmodel); colormap=cmap, colorrange=model_cr, nan_color=:lightgray)
+        model_hm = heatmap!(axm, scan.x, scan.e, zmodel; colormap=cmap, colorrange=model_cr, nan_color=:lightgray)
         xlim === nothing ? xlims!(axm, minimum(scan.x), maximum(scan.x)) : xlims!(axm, xlim[1], xlim[2])
         length(energy_ylim) == 2 && ylims!(axm, energy_ylim[1], energy_ylim[2])
         vlines!(axm, guides; color=(:white, 0.45), linewidth=1)

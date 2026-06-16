@@ -226,6 +226,42 @@ include_gperp_ratio_intensity_weight = true
 
 plot_ylim = [-0.0005, 0.0030]
 
+[kpm.q_averaging]
+# Finite-Q averaging for the 1D Sunny KPM cuts.  This mirrors the current
+# 2D Sunny q_averaging approximation, but applies it to each qtag cut.
+# It is not yet the full analytical event histogrammer; it is the controlled
+# 1D counterpart of the 2D path-center + Gaussian-Q-resolution approximation.
+enabled = true
+mode = "gaussian_grid"
+n_h = 3
+n_k = 3
+n_l = 1
+sigma_H_rlu = 0.037
+sigma_K_rlu = 0.037
+sigma_L_rlu = 0.0
+grid_nsigma = 1.5
+
+[kpm.experimental_histogram]
+# First 1D histogramming step: use the measured H/K/L columns from the 1D
+# scan file as the nominal Q center, then apply [kpm.q_averaging] offsets.
+# The current CNCS 1D files are energy scans at nearly fixed Q, so this is the
+# direct analogue of the 2D finite-Q averaging already implemented.
+enabled = true
+mode = "cut_center_plus_resolution_grid"
+use_scan_q_columns = true
+
+[kpm.energy_resolution]
+# Optional post-KPM energy-resolution deposition for 1D Sunny cuts.
+# When enabled, the native Sunny/KPM spectrum is deposited onto the experimental
+# energy-bin centers using a Gaussian resolution kernel.  If
+# subtract_kpm_kernel=true, the fixed KPM kernel is subtracted in quadrature so
+# the total width is closer to the tabulated instrumental resolution.
+enabled = true
+mode = "tabulated_fwhm"
+subtract_kpm_kernel = true
+min_sigma_meV = 1e-6
+fwhm_table_meV = [[0.5, 0.155], [1.0, 0.136], [1.5, 0.116], [2.0, 0.098], [2.5, 0.083], [3.0, 0.070], [4.0, 0.055]]
+
 [kpm_2d]
 # Experimental 2D CNCS comparison using the same visual convention as
 # scripts/plot_2d_data_vs_model.jl:
@@ -278,3 +314,23 @@ sigma_H_rlu = 0.037
 sigma_K_rlu = 0.037
 sigma_L_rlu = 0.0
 grid_nsigma = 1.5
+
+
+[kpm_2d.experimental_histogram]
+# More faithful 2D histogram-style Q sampling for Sunny KPM.
+# enabled=false reverts to path-center plus [kpm_2d.q_averaging] offsets.
+# enabled=true additionally samples each displayed path-coordinate pixel/bin.
+# Total Q evaluations per displayed pixel = n_path * n_h * n_k * n_l.
+enabled = true
+mode = "path_bin_plus_resolution_grid"
+sample_path_bin = true
+n_path = 3
+
+[kpm_2d.energy_resolution]
+# Post-KPM energy-resolution deposition onto the experimental energy grid.
+# This replaces simple interpolation/bin-averaging for the 2D data-vs-model plot.
+enabled = true
+mode = "tabulated_fwhm"
+subtract_kpm_kernel = true
+min_sigma_meV = 1e-6
+fwhm_table_meV = [[0.5, 0.155], [1.0, 0.136], [1.5, 0.116], [2.0, 0.098], [2.5, 0.083], [3.0, 0.070], [4.0, 0.055]]
