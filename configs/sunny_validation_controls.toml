@@ -242,13 +242,27 @@ sigma_L_rlu = 0.0
 grid_nsigma = 1.5
 
 [kpm.experimental_histogram]
-# First 1D histogramming step: use the measured H/K/L columns from the 1D
-# scan file as the nominal Q center, then apply [kpm.q_averaging] offsets.
-# The current CNCS 1D files are energy scans at nearly fixed Q, so this is the
-# direct analogue of the 2D finite-Q averaging already implemented.
+# Optional 1D event-style / analytical-cut-volume Q histogram approximation.
+#
+# mode = "cut_center_plus_resolution_grid"
+#   The cheaper previous mode: one measured Q center per qtag, then apply
+#   [kpm.q_averaging] momentum-resolution offsets.
+#
+# mode = "analytical_cut_volume_grid"
+#   New event-style approximation: sample measured Q inside the same nominal
+#   1D cut boxes used by the analytical histogrammer, then apply the
+#   [kpm.q_averaging] momentum-resolution offsets around every measured-Q
+#   sample.  This is closer to the analytical event histogrammer but can be
+#   much slower.  Total Sunny q points per cut = n_measured_h*n_measured_k*
+#   n_measured_l*n_h*n_k*n_l.
 enabled = true
-mode = "cut_center_plus_resolution_grid"
+mode = "analytical_cut_volume_grid"
 use_scan_q_columns = true
+measured_grid_mode = "uniform_grid"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+max_q_samples = 5000
 
 [kpm.energy_resolution]
 # Optional post-KPM energy-resolution deposition for 1D Sunny cuts.

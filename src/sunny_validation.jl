@@ -1855,7 +1855,20 @@ function sv_kpm_1d_experimental_histogram_controls(controls::Dict)
     enabled = Bool(get(eh, "enabled", false))
     mode = Symbol(get(eh, "mode", "cut_center_plus_resolution_grid"))
     use_scan_q_columns = Bool(get(eh, "use_scan_q_columns", true))
-    return (; enabled, mode, use_scan_q_columns)
+
+    # Event-style / analytical-cut-volume approximation.  This samples measured
+    # Q inside the same nominal 1D cut boxes as the analytical histogrammer, then
+    # applies the [kpm.q_averaging] momentum-resolution offsets around each
+    # measured Q.  Keep the default grids small: each Sunny KPM call evaluates all
+    # q points in one batch, but the cost still scales with n_measured*n_qavg.
+    n_measured_h = Int(get(eh, "n_measured_h", get(eh, "n_H", 3)))
+    n_measured_k = Int(get(eh, "n_measured_k", get(eh, "n_K", 3)))
+    n_measured_l = Int(get(eh, "n_measured_l", get(eh, "n_L", 1)))
+    measured_grid_mode = Symbol(get(eh, "measured_grid_mode", "uniform_grid"))
+    max_q_samples = Int(get(eh, "max_q_samples", 5000))
+
+    return (; enabled, mode, use_scan_q_columns, n_measured_h, n_measured_k,
+        n_measured_l, measured_grid_mode, max_q_samples)
 end
 
 function sv_kpm_1d_q_average_offsets(controls::Dict)
@@ -1895,12 +1908,129 @@ function sv_kpm_1d_q_center(cut::SVNeutronCut1D, controls::Dict)
     end
 end
 
-function sv_kpm_1d_average_qsampled_intensity(I::AbstractMatrix, qavg)
+function sv_1d_analytical_cut_ranges(qtag::AbstractString)
+    # Same nominal 1D cut boxes used by the analytical histogrammer
+    # default_cuts_1d() in the legacy co-fit script.  These ranges describe the
+    # measured Q volume being integrated before momentum-resolution convolution.
+    if qtag == "0_1_0"
+        return (;
+            H=(-0.1, 0.1),
+            K=(0.9, 1.1),
+            L=(-0.3, 0.3),
+            label="Gamma_cut_center_0_1_0",
+        )
+    elseif qtag == "0p33_0p33_0"
+        return (;
+            H=(0.23, 0.43),
+            K=(0.23, 0.43),
+            L=(-0.3, 0.3),
+            label="M_label_cut_center_1over3_1over3_0",
+        )
+    elseif qtag == "0p5_0_0"
+        return (;
+            H=(0.4, 0.6),
+            K=(-0.1, 0.1),
+            L=(-0.3, 0.3),
+            label="K_label_cut_center_1over2_0_0",
+        )
+    else
+        error("No analytical 1D cut-volume ranges defined for qtag=$qtag")
+    end
+end
+
+function sv_uniform_grid_axis_1d(n::Integer, range_tuple::Tuple{Float64,Float64})
+    n = Int(n)
+    lo, hi = range_tuple
+    if n <= 1 || hi == lo
+        return ([0.5 * (lo + hi)], [1.0])
+    end
+    # Midpoint rule avoids placing samples exactly on sharp cut edges.
+    dx = (hi - lo) / n
+    xs = [lo + (i - 0.5) * dx for i in 1:n]
+    ws = fill(1.0 / n, n)
+    return (xs, ws)
+end
+
+function sv_kpm_1d_q_sampler(cut::SVNeutronCut1D, controls::Dict)
+    eh = sv_kpm_1d_experimental_histogram_controls(controls)
+    qavg = sv_kpm_1d_q_average_offsets(controls)
+
+    measured_qs = Vector{Vector{Float64}}()
+    measured_weights = Float64[]
+    cut_label = "center"
+    measured_mode = :center
+
+    if eh.enabled && eh.mode in (:analytical_cut_volume_grid, :event_style_cut_volume, :cut_volume_plus_resolution_grid)
+        eh.measured_grid_mode == :uniform_grid || error("Unsupported [kpm.experimental_histogram].measured_grid_mode=$(eh.measured_grid_mode). Use uniform_grid.")
+        ranges = sv_1d_analytical_cut_ranges(cut.qtag)
+        hs, wh = sv_uniform_grid_axis_1d(eh.n_measured_h, ranges.H)
+        ks, wk = sv_uniform_grid_axis_1d(eh.n_measured_k, ranges.K)
+        ls, wl = sv_uniform_grid_axis_1d(eh.n_measured_l, ranges.L)
+        for (ih, Hm) in enumerate(hs), (ik, Km) in enumerate(ks), (il, Lm) in enumerate(ls)
+            push!(measured_qs, [Float64(Hm), Float64(Km), Float64(Lm)])
+            push!(measured_weights, wh[ih] * wk[ik] * wl[il])
+        end
+        cut_label = ranges.label
+        measured_mode = :analytical_cut_volume_grid
+    else
+        push!(measured_qs, sv_kpm_1d_q_center(cut, controls))
+        push!(measured_weights, 1.0)
+        measured_mode = eh.enabled ? eh.mode : :qtag_center
+    end
+
+    qs = Vector{Vector{Float64}}()
+    weights = Float64[]
+    for (im, qm) in enumerate(measured_qs), (ioff, off) in enumerate(qavg.offsets)
+        push!(qs, Float64.(qm) .+ off)
+        push!(weights, measured_weights[im] * qavg.weights[ioff])
+    end
+
+    sw = sum(weights)
+    if !(isfinite(sw) && sw > 0)
+        weights .= 1.0 / length(weights)
+    else
+        weights ./= sw
+    end
+
+    if length(qs) > eh.max_q_samples
+        error("1D Sunny event-style q sampler requested $(length(qs)) q points, exceeding max_q_samples=$(eh.max_q_samples). Reduce n_measured_* or q_averaging grid, or raise max_q_samples.")
+    end
+
+    q_center = [sum(weights[i] * qs[i][j] for i in eachindex(qs)) for j in 1:3]
+    return (;
+        enabled = (eh.enabled || qavg.enabled),
+        mode = eh.enabled ? eh.mode : qavg.mode,
+        measured_mode,
+        cut_label,
+        qs,
+        weights,
+        q_center,
+        n_samples = length(qs),
+        n_measured = length(measured_qs),
+        n_resolution = qavg.n_samples,
+        q_average_enabled = qavg.enabled,
+        experimental_histogram_enabled = eh.enabled,
+        use_scan_q_columns = eh.use_scan_q_columns,
+        sigma_H = qavg.sigma_H,
+        sigma_K = qavg.sigma_K,
+        sigma_L = qavg.sigma_L,
+        n_h = qavg.n_h,
+        n_k = qavg.n_k,
+        n_l = qavg.n_l,
+        grid_nsigma = qavg.grid_nsigma,
+        measured_n_h = eh.n_measured_h,
+        measured_n_k = eh.n_measured_k,
+        measured_n_l = eh.n_measured_l,
+        max_q_samples = eh.max_q_samples,
+    )
+end
+
+function sv_kpm_1d_average_qsampled_intensity(I::AbstractMatrix, sampler)
     nE, nq = size(I)
-    nq == qavg.n_samples || error("Expected $(qavg.n_samples) 1D q-sampled columns but got $nq")
+    nq == sampler.n_samples || error("Expected $(sampler.n_samples) 1D q-sampled columns but got $nq")
     out = zeros(Float64, nE)
     for iq in 1:nq
-        out .+= qavg.weights[iq] .* I[:, iq]
+        out .+= sampler.weights[iq] .* I[:, iq]
     end
     return out
 end
@@ -1926,9 +2056,21 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
     randomize_spins!(sys)
     minimize_energy!(sys; maxiters)
 
-    q_center = cut === nothing ? sv_qtag_to_q(qtag) : sv_kpm_1d_q_center(cut, controls)
-    qavg = sv_kpm_1d_q_average_offsets(controls)
-    qs = [Float64.(q_center) .+ off for off in qavg.offsets]
+    sampler = if cut === nothing
+        qavg0 = sv_kpm_1d_q_average_offsets(controls)
+        q0 = sv_qtag_to_q(qtag)
+        qs0 = [Float64.(q0) .+ off for off in qavg0.offsets]
+        (; enabled=qavg0.enabled, mode=qavg0.mode, measured_mode=:qtag_center,
+            cut_label="qtag_center", qs=qs0, weights=qavg0.weights, q_center=Float64.(q0),
+            n_samples=qavg0.n_samples, n_measured=1, n_resolution=qavg0.n_samples,
+            q_average_enabled=qavg0.enabled, experimental_histogram_enabled=false,
+            use_scan_q_columns=false, sigma_H=qavg0.sigma_H, sigma_K=qavg0.sigma_K, sigma_L=qavg0.sigma_L,
+            n_h=qavg0.n_h, n_k=qavg0.n_k, n_l=qavg0.n_l, grid_nsigma=qavg0.grid_nsigma,
+            measured_n_h=1, measured_n_k=1, measured_n_l=1, max_q_samples=typemax(Int))
+    else
+        sv_kpm_1d_q_sampler(cut, controls)
+    end
+    qs = sampler.qs
 
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
@@ -1938,7 +2080,7 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
 
     I0 = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))
     Ipost, form_factor_weight, form_factor_amplitude, qmag_Ainv = sv_apply_form_factor_to_intensity(I0, qs, controls)
-    Iavg = sv_kpm_1d_average_qsampled_intensity(Ipost, qavg)
+    Iavg = sv_kpm_1d_average_qsampled_intensity(Ipost, sampler)
 
     return (;
         energy_meV = energies,
@@ -1946,14 +2088,16 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
         intensity_qsampled = Ipost,
         intensity_no_form_factor = I0,
         result = res,
-        q = Float64.(q_center),
+        q = Float64.(sampler.q_center),
         qs = qs,
-        q_average = qavg,
-        q_average_enabled = qavg.enabled,
-        q_samples = qavg.n_samples,
-        form_factor_weight = sum(qavg.weights .* form_factor_weight),
-        form_factor_amplitude = sum(qavg.weights .* form_factor_amplitude),
-        qmag_Ainv = sum(qavg.weights .* qmag_Ainv),
+        q_average = sampler,
+        q_average_enabled = sampler.q_average_enabled,
+        q_samples = sampler.n_samples,
+        q_measured_samples = sampler.n_measured,
+        q_resolution_samples = sampler.n_resolution,
+        form_factor_weight = sum(sampler.weights .* form_factor_weight),
+        form_factor_amplitude = sum(sampler.weights .* form_factor_amplitude),
+        qmag_Ainv = sum(sampler.weights .* qmag_Ainv),
     )
 end
 
@@ -2146,11 +2290,15 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
                 form_factor_amplitude = disp.form_factor_amplitude,
                 q_average_enabled = disp.q_average_enabled,
                 q_samples = disp.q_samples,
+                q_measured_samples = disp.q_measured_samples,
+                q_resolution_samples = disp.q_resolution_samples,
                 q_sigma_H = disp.q_average.sigma_H,
                 q_sigma_K = disp.q_average.sigma_K,
                 q_sigma_L = disp.q_average.sigma_L,
                 experimental_histogram_enabled = eh1d.enabled,
                 experimental_histogram_mode = eh1d.mode,
+                experimental_histogram_measured_mode = disp.q_average.measured_mode,
+                experimental_histogram_cut_label = disp.q_average.cut_label,
                 use_scan_q_columns = eh1d.use_scan_q_columns,
             ))
         end
@@ -2187,7 +2335,7 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
 
         csv_path = joinpath(out_table_dir, @sprintf("sunny_kpm_1d_%s_%gT_vs_exp.csv", r.qtag, r.B_T))
         sv_write_xy_csv(csv_path,
-            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,form_factor_enabled,form_factor_source,form_factor_ion,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z,energy_resolution_enabled,energy_resolution_mode,energy_resolution_subtract_kpm_kernel,experimental_histogram_enabled,experimental_histogram_mode,use_scan_q_columns,q_average_enabled,q_samples,q_sigma_H_rlu,q_sigma_K_rlu,q_sigma_L_rlu",
+            "energy_meV,I_exp,Ierr_exp,I_total_scaled,I_disp_scaled,I_flat_scaled,I_total_unscaled,I_disp_unscaled,I_flat_unweighted,residual,raw_intensity_exp,background,qx,qy,qz,Q_Ainv_center,form_factor_center,form_factor_weight_center,form_factor_enabled,form_factor_source,form_factor_ion,neutron_scale,neutron_scale_mode,neutron_scale_scope,fallback_neutron_global_scale,flat_weight,flat_to_dispersive_fraction,gperp_ratio,sunny_dims_x,sunny_dims_y,sunny_dims_z,sunny_repeat_x,sunny_repeat_y,sunny_repeat_z,sunny_system_size_x,sunny_system_size_y,sunny_system_size_z,energy_resolution_enabled,energy_resolution_mode,energy_resolution_subtract_kpm_kernel,experimental_histogram_enabled,experimental_histogram_mode,use_scan_q_columns,q_average_enabled,q_samples,q_measured_samples,q_resolution_samples,q_sigma_H_rlu,q_sigma_K_rlu,q_sigma_L_rlu,experimental_histogram_measured_mode,experimental_histogram_cut_label",
             cut.energy_meV,
             cut.intensity,
             cut.error,
@@ -2233,9 +2381,13 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
             fill(r.use_scan_q_columns, length(cut.energy_meV)),
             fill(r.q_average_enabled, length(cut.energy_meV)),
             fill(r.q_samples, length(cut.energy_meV)),
+            fill(r.q_measured_samples, length(cut.energy_meV)),
+            fill(r.q_resolution_samples, length(cut.energy_meV)),
             fill(r.q_sigma_H, length(cut.energy_meV)),
             fill(r.q_sigma_K, length(cut.energy_meV)),
             fill(r.q_sigma_L, length(cut.energy_meV)),
+            fill(String(r.experimental_histogram_measured_mode), length(cut.energy_meV)),
+            fill(r.experimental_histogram_cut_label, length(cut.energy_meV)),
         )
         push!(all_rows, (; B_T=r.B_T, qtag=r.qtag, csv_path, neutron_scale))
     end
