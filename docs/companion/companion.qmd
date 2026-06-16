@@ -1,0 +1,25 @@
+---
+title: "YbZn2GaO5 analysis companion"
+author: "Daniel Pajerowski and collaborators"
+date: "2026-06-16"
+format:
+  html:
+    toc: true
+    number-sections: true
+  pdf:
+    toc: true
+    number-sections: true
+---
+
+This is a starter Quarto wrapper for the modular companion documents in `docs/companion/`.
+
+For now, edit the Markdown chapter files directly. A later version can convert these to Quarto chapters or use a project-level `_quarto.yml`.
+
+## Companion sections
+
+- [Experiment and run inventory](01_experiment_and_run_inventory.md)
+- [Neutron reduction and backgrounds](02_neutron_reduction_backgrounds.md)
+- [Analytical field-polarized neutron model](03_analytical_field_polarized_neutron_model.md)
+- [Magnetization model](04_magnetization_model.md)
+- [Sunny validation](05_sunny_validation.md)
+- [Reproducibility and provenance](06_reproducibility_and_provenance.md)
