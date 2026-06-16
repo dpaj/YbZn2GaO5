@@ -1,0 +1,82 @@
+# configs/feature_extraction_controls.toml
+#
+# Empirical feature extraction controls for YbZn2GaO5.
+#
+# This is not the full Hamiltonian co-fit. It extracts interpretable empirical
+# descriptors from the experimental 1D neutron scans and magnetization curve.
+
+[data]
+neutron_1d_subdir = "data/neutron/CNCS_1d_scans"
+magnetization_csv = "data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv"
+
+[neutron]
+Ei_meV = 4.65
+temperature_K = 0.07
+fields_T = [9.0, 14.0]
+background_fields_T = [0.0, 9.0, 14.0]
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+
+# Use the same conceptual tail/background-subtracted data mode as the co-fit.
+# This is the recommended/default mode for comparing extracted features to the
+# co-fit and final analytical model.
+background_mode = "tail_bgsub"
+
+use_errors = true
+error_floor = 2.0e-5
+maxiters = 3500
+show_trace = false
+
+# Stabilization test: do not fit a second residual constant background after
+# applying the co-fit-style tail background subtraction.
+fit_constant_offset = false
+
+[neutron.initialization]
+# Use the latest co-fit parameters only to seed the empirical feature fit.
+# These are initial guesses, not hard constraints.
+mode = "cofit_informed"
+best_fit_parameters_toml = "configs/best_fit_parameters.toml"
+resolution_sigma_meV = 0.08
+amp_split_flat_fraction = 0.5
+
+[neutron.background]
+# Match the co-fit tail-background defaults.
+low_window = [0.0, 0.75]
+high_threshold = 2.5
+structured_fit_window = [1.0, 3.0]
+interpolation_kind = "pchip"
+energy_offset = 0.15
+clip_negative_residuals = false
+
+[neutron.background.residual_windows]
+"0p33_0p33_0" = [1.675, 2.375]
+"0p5_0_0" = [1.825, 2.425]
+
+[neutron.fit_windows]
+"0_1_0" = [[0.5, 3.6]]
+"0p33_0p33_0" = [[0.5, 3.4]]
+"0p5_0_0" = [[0.5, 3.4]]
+
+[magnetization]
+temperature_K = 0.42
+Bmin_fit_T = 0.0
+Bmax_fit_T = 7.0
+Bmin_plot_T = 0.0
+Bmax_plot_T = 7.0
+dB_plot_T = 0.01
+initial_chi_vv_muB_per_T = 0.07826757513
+initial_g_flat = 2.998557026
+quad_n = 101
+maxiters = 3500
+show_trace = false
+
+[plotting]
+make_plots = true
+
+# Neutron-panel y-axis range for the feature overview plot.
+# This matches the scale that makes the Γ=(0,1,0) peak visible without
+# letting background outliers dominate the display.
+neutron_ylim = [-0.0005, 0.0030]
+
+[output]
+feature_table_subdir = "results/feature_tables/neutron_magnetization_features"
+figure_subdir = "results/figures/neutron_magnetization_features"
