@@ -198,7 +198,9 @@ For reproducing figures or checking scripts:
 The following items are still evolving:
 
 - final choice of canonical background subtraction for some neutron cuts,
+- inclusion of the AC data for magnetization, specificall the in-plane data to constrain g-factors of the dispersive phase,
 - quantitative comparison of analytical histogramming versus Sunny/KPM-style calculations,
+
         Analytical sigma_J:
             distribution of clean dispersions from different effective regions
 
@@ -209,8 +211,8 @@ The following items are still evolving:
 - finite-size and disorder-realization effects in Sunny.jl,
 - GPU acceleration of LSWT KPM calcs,
 - AI utilization and more global optimization,
-- Optimization of parameters based on Sunny,
-- Finite temperature for the Sunny.jl magnetization large cell model,
+- optimization of parameters based on Sunny,
+- finite temperature for the Sunny.jl magnetization large cell model,
 - utilization of Sunny.jl to extend high-field models to zero-field,
 - final figure provenance table for all publication-quality outputs.
 
