@@ -1,0 +1,96 @@
+# configs/sunny_kpm_1d_disp_grid_2sigmaJ_controls.toml
+#
+# Targeted Sunny.jl KPM diagnostic for the dispersive component only:
+#   - use deterministic 1D histogramming with a 5×5 measured-Q grid
+#   - use a 5×5 Gaussian momentum-resolution grid
+#   - no L integration yet: n_measured_l = n_l = 1
+#   - set sigma_J used in Sunny to 2× the canonical best-fit sigma_J
+#
+# Run with:
+#   julia --project=. scripts/sunny_kpm_1d_disp_grid_2sigmaJ_vs_exp.jl
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/disp_grid_2sigmaJ"
+table_subdir = "results/feature_tables/sunny_validation/disp_grid_2sigmaJ"
+
+[run]
+fields_T = [9.0, 14.0]
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+
+# Main test knob.
+sigma_J_multiplier = 2.0
+
+# Since this is dispersive-only, a diagnostic fitted scale is usually better
+# for judging line shape. The CSV also includes a column scaled by the original
+# best-fit neutron_global_scale for reference.
+# Options: "best_fit", "manual", "global_least_squares", "panel_least_squares".
+scale_mode = "panel_least_squares"
+manual_neutron_scale = 1.0
+scale_fit_window_meV = [0.5, 3.0]
+scale_use_uncertainties = true
+scale_positive_experiment_only = false
+scale_positive_model_only = false
+
+plot_ylim = [-0.0005, 0.0030]
+title_suffix = "Sunny KPM dispersive only: 5×5 measured × 5×5 resolution, 2×σJ"
+
+[control_overrides.common]
+fields_T = [9.0, 14.0]
+seed = 20260611
+sunny_transverse_gxy = 1.0
+
+[control_overrides.kpm]
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+include_exchange_disorder = true
+include_gzz_disorder = true
+
+# Keep the same energy grid as the usual Sunny KPM validation.
+energy_min_meV = 0.0
+energy_max_meV = 4.0
+n_energy = 161
+kernel_fwhm_meV = 0.08
+tol = 0.05
+maxiters = 1000
+
+# Histogram/interpolate the computed Sunny spectrum onto the experimental
+# energy-grid. The energy-resolution subsection below optionally performs the
+# resolution deposition before this fallback is used.
+histogram_mode = "bin_average"
+
+# Keep this as a reference convention; the script's [run].scale_mode controls
+# the plotted fitted-scale curve.
+use_neutron_global_scale_from_best_fit = true
+manual_neutron_global_scale = 1.0
+include_gperp_ratio_intensity_weight = true
+plot_ylim = [-0.0005, 0.0030]
+
+[control_overrides.kpm.experimental_histogram]
+enabled = true
+mode = "analytical_cut_volume_grid"
+use_scan_q_columns = true
+measured_grid_mode = "uniform_grid"
+n_measured_h = 5
+n_measured_k = 5
+n_measured_l = 1
+max_q_samples = 5000
+
+[control_overrides.kpm.q_averaging]
+enabled = true
+mode = "gaussian_grid"
+n_h = 5
+n_k = 5
+n_l = 1
+sigma_H_rlu = 0.037
+sigma_K_rlu = 0.037
+sigma_L_rlu = 0.0
+grid_nsigma = 1.5
+
+[control_overrides.kpm.energy_resolution]
+# Post-deposit the KPM spectrum onto the experimental energy grid using the
+# same approximate CNCS resolution table used in the Sunny validation controls.
+enabled = true
+mode = "tabulated_fwhm"
+subtract_kpm_kernel = true
+min_sigma_meV = 1e-6
+fwhm_table_meV = [[0.5, 0.155], [1.0, 0.136], [1.5, 0.116], [2.0, 0.098], [2.5, 0.083], [3.0, 0.070], [4.0, 0.055]]
