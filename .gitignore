@@ -23,3 +23,6 @@ results/feature_tables/*
 # Large/generated data, decide later whether Git LFS handles these
 data/raw/
 data/generated/
+# Local Sunny benchmark outputs
+sunny_kpm_core_benchmark_output/
+sunny_kpm_cpu_gpu_benchmark_output/
