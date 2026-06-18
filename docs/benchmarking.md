@@ -164,6 +164,7 @@ The CPU/GPU comparison script is controlled by environment variables.
 | `SUNNY_KPM_GPU_BATCHED` | `1` | Whether to use the batched GPU device path when available |
 | `SUNNY_KPM_GPU_PRECISION` | `Float64` or `Float32` | Device precision |
 | `SUNNY_KPM_BASELINE_CSV` | path to `spectrum_main_cpu_cpu.csv` | Optional baseline spectrum for comparison |
+| `SUNNY_KPM_TRACK_MEMORY` | `1` or `0` | Include lightweight CPU allocation and CUDA memory snapshots in the profile output; default is `1` |
 
 ## Changing the Q-grid size
 
@@ -217,6 +218,31 @@ GPU KPM seconds per Q
 CPU/GPU relative RMSE
 CPU/GPU relative integrated intensity error
 baseline-vs-current relative RMSE
+```
+
+## Memory tracking
+
+The profile CSV also includes lightweight memory diagnostics. These are intended for scaling
+checks rather than full memory profiling. The key columns are:
+
+```text
+cpu_alloc_bytes
+cpu_live_after_bytes
+gpu_used_after_bytes
+gpu_used_delta_bytes
+gpu_free_after_bytes
+gpu_total_bytes
+```
+
+`cpu_alloc_bytes` is the Julia allocation count reported for that timed stage. The CUDA memory
+columns are populated only after the CUDA package/backend is loaded. They are most useful for
+checking how GPU memory changes when varying Q-grid size, system size, precision, or batched
+versus non-batched execution.
+
+To disable memory snapshots for a minimal timing run:
+
+```powershell
+$env:SUNNY_KPM_TRACK_MEMORY="0"
 ```
 
 For the first successful Float64 test, CPU and GPU spectra should agree to numerical precision

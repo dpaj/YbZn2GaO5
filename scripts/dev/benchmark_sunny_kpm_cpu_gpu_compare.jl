@@ -18,6 +18,7 @@
 #   SUNNY_KPM_BENCH_LABEL=main      label used in output filenames
 #   SUNNY_KPM_OUTPUT_DIR=...        output directory
 #   SUNNY_KPM_BASELINE_CSV=...      compare spectra to a previous run
+#   SUNNY_KPM_TRACK_MEMORY=1        include light CPU/CUDA memory snapshots
 
 using Sunny
 using LinearAlgebra
@@ -77,13 +78,18 @@ const Q_CENTER = [0.0, 1.0, 0.0]
 const MEASURED_HALF_WIDTH = [0.05, 0.05, 0.0]
 const RESOLUTION_SIGMA = [0.035, 0.035, 0.0]
 const RESOLUTION_NSIGMA = 2.0
-const N_MEASURED = (7, 7, 1)
+const N_MEASURED = (5, 5, 1)
 const N_RESOLUTION = (5, 5, 1)
 
 const ENABLE_GPU = lowercase(get(ENV, "SUNNY_KPM_ENABLE_GPU", "0")) in ("1", "true", "yes", "on")
 const GPU_BACKEND_NAME = get(ENV, "SUNNY_KPM_GPU_BACKEND", "CUDA")
 const GPU_BATCHED = lowercase(get(ENV, "SUNNY_KPM_GPU_BATCHED", "1")) in ("1", "true", "yes", "on")
 const GPU_PRECISION_NAME = get(ENV, "SUNNY_KPM_GPU_PRECISION", "Float64")
+const TRACK_MEMORY = lowercase(get(ENV, "SUNNY_KPM_TRACK_MEMORY", "1")) in ("1", "true", "yes", "on")
+
+# Optional module reference filled by maybe_make_backend(). This keeps CUDA optional
+# for CPU-only runs while allowing memory snapshots after CUDA is loaded.
+const CUDA_MODULE_REF = Ref{Any}(nothing)
 
 # -----------------------------------------------------------------------------
 # Timing / IO helpers
@@ -94,13 +100,74 @@ struct TimerRows
 end
 TimerRows() = TimerRows(NamedTuple[])
 
+_memory_missing() = (; used=missing, free=missing, total=missing)
+
+function safe_gc_live_bytes()
+    TRACK_MEMORY || return missing
+    try
+        return Base.gc_live_bytes()
+    catch
+        return missing
+    end
+end
+
+function cuda_memory_snapshot()
+    TRACK_MEMORY || return _memory_missing()
+    lowercase(GPU_BACKEND_NAME) == "cuda" || return _memory_missing()
+    cuda = CUDA_MODULE_REF[]
+    cuda === nothing && return _memory_missing()
+    try
+        free = Base.invokelatest(getproperty(cuda, :available_memory))
+        total = Base.invokelatest(getproperty(cuda, :total_memory))
+        free_f = Float64(free)
+        total_f = Float64(total)
+        return (; used=total_f - free_f, free=free_f, total=total_f)
+    catch
+        return _memory_missing()
+    end
+end
+
+function csv_field(x)
+    x === missing && return ""
+    if x isa AbstractString
+        return replace(String(x), '"' => "'", ',' => ';')
+    elseif x isa Integer
+        return string(x)
+    elseif x isa Real
+        return isfinite(Float64(x)) ? @sprintf("%.9g", Float64(x)) : string(x)
+    else
+        return replace(string(x), '"' => "'", ',' => ';')
+    end
+end
+
 function timed!(f, timers::TimerRows, implementation::AbstractString, stage::AbstractString;
                 q_samples::Int=0, note::AbstractString="")
-    t0 = time_ns()
-    result = f()
-    elapsed = (time_ns() - t0) / 1e9
+    cpu_live_before = safe_gc_live_bytes()
+    gpu_before = cuda_memory_snapshot()
+    timed = @timed f()
+    result = timed.value
+    elapsed = timed.time
+    cpu_live_after = safe_gc_live_bytes()
+    gpu_after = cuda_memory_snapshot()
+
+    gpu_delta = (gpu_before.used === missing || gpu_after.used === missing) ?
+                missing : gpu_after.used - gpu_before.used
+    cpu_live_delta = (cpu_live_before === missing || cpu_live_after === missing) ?
+                     missing : cpu_live_after - cpu_live_before
+
     push!(timers.rows, (; implementation=String(implementation), stage=String(stage),
-                         seconds=elapsed, q_samples=q_samples, note=String(note)))
+                         seconds=elapsed, q_samples=q_samples,
+                         cpu_alloc_bytes=timed.bytes,
+                         cpu_gc_time_seconds=timed.gctime,
+                         cpu_live_before_bytes=cpu_live_before,
+                         cpu_live_after_bytes=cpu_live_after,
+                         cpu_live_delta_bytes=cpu_live_delta,
+                         gpu_used_before_bytes=gpu_before.used,
+                         gpu_used_after_bytes=gpu_after.used,
+                         gpu_used_delta_bytes=gpu_delta,
+                         gpu_free_after_bytes=gpu_after.free,
+                         gpu_total_bytes=gpu_after.total,
+                         note=String(note)))
     @printf("%-10s %-24s %10.3f s", implementation, stage, elapsed)
     q_samples > 0 && @printf("   (%d Q, %.6f s/Q)", q_samples, elapsed / q_samples)
     isempty(note) || @printf("   %s", note)
@@ -111,12 +178,23 @@ end
 function write_profile_csv(path::AbstractString, rows)
     mkpath(dirname(path))
     open(path, "w") do io
-        println(io, "implementation,stage,seconds,q_samples,seconds_per_q,note")
+        println(io, join([
+            "implementation", "stage", "seconds", "q_samples", "seconds_per_q",
+            "cpu_alloc_bytes", "cpu_gc_time_seconds", "cpu_live_before_bytes",
+            "cpu_live_after_bytes", "cpu_live_delta_bytes", "gpu_used_before_bytes",
+            "gpu_used_after_bytes", "gpu_used_delta_bytes", "gpu_free_after_bytes",
+            "gpu_total_bytes", "note"
+        ], ','))
         for r in rows
             spq = r.q_samples > 0 ? r.seconds / r.q_samples : NaN
-            note = replace(r.note, '"' => "'", ',' => ';')
-            @printf(io, "%s,%s,%.9g,%d,%.9g,%s\n",
-                    r.implementation, r.stage, r.seconds, r.q_samples, spq, note)
+            vals = [
+                r.implementation, r.stage, r.seconds, r.q_samples, spq,
+                r.cpu_alloc_bytes, r.cpu_gc_time_seconds, r.cpu_live_before_bytes,
+                r.cpu_live_after_bytes, r.cpu_live_delta_bytes, r.gpu_used_before_bytes,
+                r.gpu_used_after_bytes, r.gpu_used_delta_bytes, r.gpu_free_after_bytes,
+                r.gpu_total_bytes, r.note
+            ]
+            println(io, join(csv_field.(vals), ','))
         end
     end
     return path
@@ -200,6 +278,7 @@ function write_summary_txt(path::AbstractString, profile_rows, spectra, comparis
         println(io, "gpu_backend = ", GPU_BACKEND_NAME)
         println(io, "gpu_batched = ", GPU_BATCHED)
         println(io, "gpu_precision = ", GPU_PRECISION_NAME)
+        println(io, "track_memory = ", TRACK_MEMORY)
         println(io)
         println(io, "field_T = ", FIELD_T)
         println(io, "dims = ", DIMS)
@@ -222,6 +301,25 @@ function write_summary_txt(path::AbstractString, profile_rows, spectra, comparis
             println(io, implementation, "_kpm_fraction = ", total > 0 ? kpm / total : NaN)
         end
         println(io)
+
+        if TRACK_MEMORY
+            gpu_used = Float64[]
+            gpu_total = Float64[]
+            for r in profile_rows
+                r.gpu_used_after_bytes === missing || push!(gpu_used, Float64(r.gpu_used_after_bytes))
+                r.gpu_total_bytes === missing || push!(gpu_total, Float64(r.gpu_total_bytes))
+            end
+            if !isempty(gpu_used)
+                peak_used = maximum(gpu_used)
+                println(io, "gpu_peak_used_bytes = ", peak_used)
+                println(io, "gpu_peak_used_GiB = ", peak_used / 2.0^30)
+            end
+            if !isempty(gpu_total)
+                println(io, "gpu_total_bytes = ", maximum(gpu_total))
+                println(io, "gpu_total_GiB = ", maximum(gpu_total) / 2.0^30)
+            end
+            println(io)
+        end
         for (name, spec) in spectra
             println(io, name, "_spectrum_sum = ", sum(spec))
         end
@@ -421,6 +519,7 @@ function maybe_make_backend()
         try
             ka = _require_pkg("63c18a36-062a-441e-b654-da1e3ab1ce7c", "KernelAbstractions")
             cuda = _require_pkg("052768ef-5323-5732-b1bb-66c8b64840ba", "CUDA")
+            CUDA_MODULE_REF[] = cuda
 
             functional = Base.invokelatest(getproperty(cuda, :functional))
             functional || begin
