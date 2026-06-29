@@ -178,13 +178,8 @@ To test a larger 1225-Q grid, edit the constants near the top of
 `scripts/dev/benchmark_sunny_kpm_cpu_gpu_compare.jl`:
 
 ```julia
-const N_MEASURED_H = 7
-const N_MEASURED_K = 7
-const N_MEASURED_L = 1
-
-const N_RESOLUTION_H = 5
-const N_RESOLUTION_K = 5
-const N_RESOLUTION_L = 1
+const N_MEASURED = (7, 7, 1)
+const N_RESOLUTION = (5, 5, 1)
 ```
 
 This gives:
