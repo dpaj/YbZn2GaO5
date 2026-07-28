@@ -39,48 +39,18 @@ const SV = SunnyValidation
 # Config
 # -----------------------------------------------------------------------------
 
-function _deepmerge!(dest::Dict, src::Dict)
-    for (k, v) in src
-        if v isa Dict && haskey(dest, k) && dest[k] isa Dict
-            _deepmerge!(dest[k], v)
-        else
-            dest[k] = v
-        end
-    end
-    return dest
-end
+# Shared script helpers now live in src/sunny_validation.jl (they had been
+# copy-pasted across six scripts). These thin aliases keep the local call
+# sites unchanged while the logic lives in one place.
+const _deepmerge! = SV.sv_deepmerge!
 
-_repo_path(root, p) = isabspath(p) ? normpath(p) : normpath(joinpath(root, splitpath(p)...))
+const _repo_path = SV.sv_repo_path
 
-function _load_controls(repo_root)
-    rel = isempty(ARGS) || isempty(ARGS[1]) ?
-        get(ENV, "SUNNY_MVH_FIT_CONTROLS", "configs/mvh_fit_controls.toml") : ARGS[1]
-    p = _repo_path(repo_root, rel)
-    isfile(p) || error("Could not find controls: $p")
-    diag = load_toml_config(p)
-    base = _repo_path(repo_root, get(get(diag, "paths", Dict{String,Any}()),
-        "base_controls_toml", "configs/sunny_validation_controls.toml"))
-    controls = load_toml_config(base)
-    haskey(diag, "control_overrides") && _deepmerge!(controls, diag["control_overrides"])
-    if haskey(diag, "paths")
-        for k in ("figure_subdir", "table_subdir")
-            haskey(diag["paths"], k) && (controls["paths"][k] = diag["paths"][k])
-        end
-    end
-    return (; diag, controls, diag_path=p, base)
-end
+_load_controls(repo_root) = (r = SV.sv_load_diagnostic_controls(repo_root,
+        "configs/mvh_fit_controls.toml"; env_var="SUNNY_MVH_FIT_CONTROLS");
+    (; r.diag, r.controls, r.diag_path, base=r.base_path))
 
-function _apply_overrides(params, run::Dict)
-    ov = get(run, "param_overrides", Dict{String,Any}())
-    (ov isa Dict && !isempty(ov)) || return params
-    kv = Dict{Symbol,Float64}()
-    for k in keys(ov)
-        sym = Symbol(k)
-        hasproperty(params, sym) || error("'$k' is not a model parameter")
-        kv[sym] = Float64(ov[k])
-    end
-    return merge(params, NamedTuple(kv))
-end
+const _apply_overrides = SV.sv_apply_param_overrides
 
 _setp(params, kv::Dict{Symbol,Float64}) = merge(params, NamedTuple(kv))
 
@@ -122,7 +92,15 @@ function main()
     (; diag, controls, diag_path, base) = _load_controls(REPO_ROOT)
     run = get(diag, "run", Dict{String,Any}())
     (; params, path) = SV.sv_load_params(REPO_ROOT, controls)
-    p_byeye = _apply_overrides(params, run)
+    # sv_apply_param_overrides returns (params, applied); echo what deviates from
+    # configs/best_fit_parameters.toml rather than silently using overrides.
+    p_byeye, overrides = _apply_overrides(params, run)
+    if !isempty(overrides)
+        println("\n[run.param_overrides] applied (NOT the canonical best fit):")
+        for s in overrides
+            println("  ", s)
+        end
+    end
 
     nB = Int(get(run, "nB", 18))
     Bs = collect(range(Float64(get(run, "Bmin_T", 0.2)), Float64(get(run, "Bmax_T", 6.8)); length=nB))

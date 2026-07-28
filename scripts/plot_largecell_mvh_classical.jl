@@ -26,10 +26,10 @@ using .SunnyValidation
 
 const SV = SunnyValidation
 
-function _repo_path(root, p)
-    isabspath(p) && return normpath(p)
-    return normpath(joinpath(root, splitpath(p)...))
-end
+# Shared script helpers now live in src/sunny_validation.jl (they had been
+# copy-pasted across six scripts). These thin aliases keep the local call
+# sites unchanged while the logic lives in one place.
+const _repo_path = SV.sv_repo_path
 
 function _read_csv(path)
     raw, header = readdlm(path, ','; header=true)

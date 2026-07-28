@@ -48,68 +48,21 @@ const KB_MEV_PER_K = 0.08617333262   # matches SV_KB_MEV_PER_K
 # Config plumbing (same pattern as scripts/sunny_kpm_1d_disp_grid_2sigmaJ_vs_exp.jl)
 # -----------------------------------------------------------------------------
 
-function _deepmerge!(dest::Dict, src::Dict)
-    for (k, v) in src
-        if v isa Dict && haskey(dest, k) && dest[k] isa Dict
-            _deepmerge!(dest[k], v)
-        else
-            dest[k] = v
-        end
-    end
-    return dest
-end
+# Shared script helpers now live in src/sunny_validation.jl (they had been
+# copy-pasted across six scripts). These thin aliases keep the local call
+# sites unchanged while the logic lives in one place.
+const _deepmerge! = SV.sv_deepmerge!
 
-function _repo_path(repo_root::AbstractString, p::AbstractString)
-    isabspath(p) && return normpath(p)
-    return normpath(joinpath(repo_root, splitpath(p)...))
-end
+const _repo_path = SV.sv_repo_path
 
-const DEFAULT_DIAG_CONTROLS = "configs/sunny_largecell_mvh_classical_controls.toml"
+_load_diagnostic_controls(repo_root::AbstractString) =
+    SV.sv_load_diagnostic_controls(repo_root,
+        "configs/sunny_largecell_mvh_classical_controls.toml";
+        env_var="SUNNY_MVH_CONTROLS")
 
-# Config path resolution order: first positional ARG, then SUNNY_MVH_CONTROLS,
-# then the default. Lets a cheap smoke config be swapped in without editing the
-# production one.
-function _diag_controls_path(repo_root::AbstractString)
-    if !isempty(ARGS) && !isempty(ARGS[1])
-        return _repo_path(repo_root, ARGS[1])
-    end
-    env = get(ENV, "SUNNY_MVH_CONTROLS", "")
-    isempty(env) || return _repo_path(repo_root, env)
-    return _repo_path(repo_root, DEFAULT_DIAG_CONTROLS)
-end
+const _tuple3 = SV.sv_tuple3
 
-function _load_diagnostic_controls(repo_root::AbstractString)
-    diag_path = _diag_controls_path(repo_root)
-    isfile(diag_path) || error("Could not find diagnostic controls: $diag_path")
-    diag = load_toml_config(diag_path)
-
-    base_rel = get(get(diag, "paths", Dict{String,Any}()), "base_controls_toml",
-                   "configs/sunny_validation_controls.toml")
-    base_path = _repo_path(repo_root, String(base_rel))
-    controls = load_toml_config(base_path)
-
-    haskey(diag, "control_overrides") && _deepmerge!(controls, diag["control_overrides"])
-
-    if haskey(diag, "paths")
-        paths = diag["paths"]
-        haskey(paths, "figure_subdir") && (controls["paths"]["figure_subdir"] = paths["figure_subdir"])
-        haskey(paths, "table_subdir") && (controls["paths"]["table_subdir"] = paths["table_subdir"])
-    end
-
-    return (; diag, controls, diag_path, base_path)
-end
-
-_tuple3(v) = (Int(v[1]), Int(v[2]), Int(v[3]))
-
-function _repeat_factor(cell_size, seed_dims)
-    cs, sd = _tuple3(cell_size), _tuple3(seed_dims)
-    rf = ntuple(i -> cs[i] ÷ sd[i], 3)
-    for i in 1:3
-        rf[i] * sd[i] == cs[i] ||
-            error("cell_size $cs is not an integer multiple of seed_dims $sd along axis $i")
-    end
-    return rf
-end
+const _repeat_factor = SV.sv_repeat_factor
 
 # -----------------------------------------------------------------------------
 # Timing / profile bookkeeping
@@ -517,21 +470,7 @@ end
 
 # Overrides let a by-eye or exploratory parameter set be tested without touching
 # configs/best_fit_parameters.toml. Every override is echoed and recorded.
-function _apply_param_overrides(params, run::Dict)
-    ov = get(run, "param_overrides", Dict{String,Any}())
-    (ov isa Dict && !isempty(ov)) || return (params, String[])
-    applied = String[]
-    kv = Dict{Symbol,Float64}()
-    for k in sort(collect(keys(ov)))
-        sym = Symbol(k)
-        hasproperty(params, sym) ||
-            error("[run.param_overrides] key '$k' is not a canonical model parameter")
-        push!(applied, @sprintf("%s: %.6g -> %.6g",
-            k, Float64(getproperty(params, sym)), Float64(ov[k])))
-        kv[sym] = Float64(ov[k])
-    end
-    return (merge(params, NamedTuple(kv)), applied)
-end
+const _apply_param_overrides = SV.sv_apply_param_overrides
 
 # "clean" = identical Hamiltonian with both disorder widths set to zero, so
 # sv_apply_disorder! writes uniform J and uniform gzz.
@@ -641,18 +580,7 @@ function _write_manifest_csv(path, curves, A_M_fixed, free_scales, joint_scales,
     return path
 end
 
-function _write_simple_csv(path, header::Vector{String}, rows)
-    mkpath(dirname(path))
-    open(path, "w") do io
-        println(io, join(header, ","))
-        for r in rows
-            println(io, join([v isa AbstractString ? replace(v, "," => ";") :
-                              (v isa Integer ? string(v) : @sprintf("%.10g", Float64(v)))
-                              for v in values(r)], ","))
-        end
-    end
-    return path
-end
+_write_simple_csv(path, header, rows) = SV.sv_write_rows_csv(path, rows; header)
 
 function _make_plot(path, curves, Bs, data, A_M_fixed, joint_scales, diag_run)
     mkpath(dirname(path))

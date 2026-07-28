@@ -47,50 +47,18 @@ const SV = SunnyValidation
 # Config
 # -----------------------------------------------------------------------------
 
-function _deepmerge!(dest::Dict, src::Dict)
-    for (k, v) in src
-        if v isa Dict && haskey(dest, k) && dest[k] isa Dict
-            _deepmerge!(dest[k], v)
-        else
-            dest[k] = v
-        end
-    end
-    return dest
-end
+# Shared script helpers now live in src/sunny_validation.jl (they had been
+# copy-pasted across six scripts). These thin aliases keep the local call
+# sites unchanged while the logic lives in one place.
+const _deepmerge! = SV.sv_deepmerge!
 
-_repo_path(root, p) = isabspath(p) ? normpath(p) : normpath(joinpath(root, splitpath(p)...))
+const _repo_path = SV.sv_repo_path
 
-function _load_controls(repo_root)
-    rel = isempty(ARGS) || isempty(ARGS[1]) ?
-        get(ENV, "SUNNY_MVH_LANDSCAPE_CONTROLS", "configs/mvh_landscape_controls.toml") : ARGS[1]
-    diag_path = _repo_path(repo_root, rel)
-    isfile(diag_path) || error("Could not find controls: $diag_path")
-    diag = load_toml_config(diag_path)
-    base = _repo_path(repo_root, get(get(diag, "paths", Dict{String,Any}()),
-        "base_controls_toml", "configs/sunny_validation_controls.toml"))
-    controls = load_toml_config(base)
-    haskey(diag, "control_overrides") && _deepmerge!(controls, diag["control_overrides"])
-    if haskey(diag, "paths")
-        for k in ("figure_subdir", "table_subdir")
-            haskey(diag["paths"], k) && (controls["paths"][k] = diag["paths"][k])
-        end
-    end
-    return (; diag, controls, diag_path, base)
-end
+_load_controls(repo_root) = (r = SV.sv_load_diagnostic_controls(repo_root,
+        "configs/mvh_landscape_controls.toml"; env_var="SUNNY_MVH_LANDSCAPE_CONTROLS");
+    (; r.diag, r.controls, r.diag_path, base=r.base_path))
 
-function _apply_overrides(params, run::Dict)
-    ov = get(run, "param_overrides", Dict{String,Any}())
-    (ov isa Dict && !isempty(ov)) || return (params, String[])
-    applied = String[]
-    kv = Dict{Symbol,Float64}()
-    for k in sort(collect(keys(ov)))
-        sym = Symbol(k)
-        hasproperty(params, sym) || error("[run.param_overrides] '$k' is not a model parameter")
-        push!(applied, @sprintf("%s: %.6g -> %.6g", k, Float64(getproperty(params, sym)), Float64(ov[k])))
-        kv[sym] = Float64(ov[k])
-    end
-    return (merge(params, NamedTuple(kv)), applied)
-end
+const _apply_overrides = SV.sv_apply_param_overrides
 
 _sub(d::Dict, k) = get(d, k, Dict{String,Any}())
 _set(params, name::AbstractString, v::Real) = merge(params, NamedTuple((Symbol(name) => Float64(v),)))
@@ -128,19 +96,7 @@ function (o::Obj)(params)
         maxiters=o.maxiters, threaded=o.threaded)
 end
 
-function _write_csv(path, header::Vector{String}, rows::Vector{<:NamedTuple})
-    mkpath(dirname(path))
-    open(path, "w") do io
-        println(io, join(header, ","))
-        for r in rows
-            println(io, join([v isa AbstractString ? replace(String(v), "," => ";") :
-                              v isa Bool ? string(v) :
-                              v isa Integer ? string(v) : @sprintf("%.10g", Float64(v))
-                              for v in values(r)], ","))
-        end
-    end
-    return path
-end
+_write_csv(path, header, rows) = SV.sv_write_rows_csv(path, rows; header)
 
 _hdr(rows) = String.(collect(keys(rows[1])))
 
