@@ -213,6 +213,13 @@ The following items are still evolving:
 - AI utilization and more global optimization,
 - optimization of parameters based on Sunny,
 - finite temperature for the Sunny.jl magnetization large cell model,
+
+        Now implemented as a classical M(H,T) workflow on a tunable supercell in
+        the KPM Hamiltonian scheme, using a MINIMAL single-disordered-phase model
+        (no separate non-dispersive component). See docs/largecell_mvh_classical.md
+        for the approximations, the sampler comparison, and the measured
+        classical-statistics systematic.
+
 - utilization of Sunny.jl to extend high-field models to zero-field,
 - final figure provenance table for all publication-quality outputs.
 

@@ -830,8 +830,12 @@ function sv_build_effective_sunny_system(params, controls::Dict; component::Symb
     return (; sys, crystal=cryst, units)
 end
 
-function sv_apply_disorder!(sys, params, controls::Dict; component::Symbol=:dispersive, include_exchange::Bool=true, include_gzz::Bool=true)
-    rng = MersenneTwister(Int(controls["common"]["seed"]) + 7919 + (component == :flat ? 17 : 0))
+function sv_apply_disorder!(sys, params, controls::Dict; component::Symbol=:dispersive, include_exchange::Bool=true, include_gzz::Bool=true, realization::Integer=0)
+    # `realization` offsets the RNG stream so that an ensemble of independent
+    # disorder realizations can be drawn from the same controls.  realization=0
+    # reproduces the original single-realization seed bit-for-bit, so existing
+    # neutron/KPM results are unchanged.
+    rng = MersenneTwister(Int(controls["common"]["seed"]) + 7919 + (component == :flat ? 17 : 0) + 104729 * Int(realization))
     if component == :dispersive && include_exchange
         for off in sv_j1_shell_offsets()
             for (s1, s2, o) in symmetry_equivalent_bonds(sys, Bond(1, 1, off))
