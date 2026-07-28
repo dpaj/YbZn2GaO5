@@ -5,25 +5,30 @@
 #   - use a 5×5 Gaussian momentum-resolution grid
 #   - no L integration yet: n_measured_l = n_l = 1
 #   - set sigma_J used in Sunny to 2× the canonical best-fit sigma_J
+#   - optionally multiply dispersive g-factor disorder sigma_gzz
 #
 # Run with:
 #   julia --project=. scripts/sunny_kpm_1d_disp_grid_2sigmaJ_vs_exp.jl
 
 [paths]
 base_controls_toml = "configs/sunny_validation_controls.toml"
-figure_subdir = "results/figures/sunny_validation/disp_grid_2sigmaJ"
-table_subdir = "results/feature_tables/sunny_validation/disp_grid_2sigmaJ"
+figure_subdir = "results/figures/sunny_validation/disp_grid_sigma_knobs"
+table_subdir = "results/feature_tables/sunny_validation/disp_grid_sigma_knobs"
 
 [run]
 fields_T = [9.0, 14.0]
 qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
 
-# Main test knob.
-sigma_J_multiplier = 2.0
+# Main test knobs. The dispersive Sunny model uses:
+#   sigma_J_used   = sigma_J_multiplier   × best_fit.sigma_J
+#   sigma_gzz_used = sigma_gzz_multiplier × best_fit.sigma_gzz
+sigma_J_multiplier = 3.0
+sigma_gzz_multiplier = 2.0
 
 # Since this is dispersive-only, a diagnostic fitted scale is usually better
-# for judging line shape. The CSV also includes a column scaled by the original
-# best-fit neutron_global_scale for reference.
+# for judging line shape. The original analytical best-fit neutron scale is not
+# plotted by default because Sunny and the analytical model use different
+# intensity prefactors; set plot_best_fit_scale=true only for debugging.
 # Options: "best_fit", "manual", "global_least_squares", "panel_least_squares".
 scale_mode = "panel_least_squares"
 manual_neutron_scale = 1.0
@@ -31,9 +36,17 @@ scale_fit_window_meV = [0.5, 3.0]
 scale_use_uncertainties = true
 scale_positive_experiment_only = false
 scale_positive_model_only = false
+plot_best_fit_scale = false
+
+# Reuse one disordered, field-polarized, minimized Sunny system/KPM object per field
+# across all qtags. This is both faster and scientifically cleaner than rebuilding
+# and minimizing separately for every energy cut.
+reuse_ground_state_by_field = true
+initial_spin_state = "field_polarized"
+relax_ground_state = true
 
 plot_ylim = [-0.0005, 0.0030]
-title_suffix = "Sunny KPM dispersive only: 5×5 measured × 5×5 resolution, 2×σJ"
+title_suffix = "Sunny KPM dispersive only: 5×5 measured × 5×5 resolution, 2×σJ, 1×σgzz"
 
 [control_overrides.common]
 fields_T = [9.0, 14.0]
@@ -51,7 +64,7 @@ energy_max_meV = 4.0
 n_energy = 161
 kernel_fwhm_meV = 0.08
 tol = 0.05
-maxiters = 1000
+maxiters = 50000
 
 # Histogram/interpolate the computed Sunny spectrum onto the experimental
 # energy-grid. The energy-resolution subsection below optionally performs the

@@ -1865,10 +1865,21 @@ function sv_kpm_1d_experimental_histogram_controls(controls::Dict)
     n_measured_k = Int(get(eh, "n_measured_k", get(eh, "n_K", 3)))
     n_measured_l = Int(get(eh, "n_measured_l", get(eh, "n_L", 1)))
     measured_grid_mode = Symbol(get(eh, "measured_grid_mode", "uniform_grid"))
-    max_q_samples = Int(get(eh, "max_q_samples", 5000))
+
+    # Expensive / event-style option.  This draws many measured-Q points inside
+    # the analytical 1D cut volume and applies a random Gaussian momentum-
+    # resolution kick to each event.  It is much closer in spirit to the
+    # analytical histogrammer than the deterministic grid approximation, but the
+    # number of Sunny KPM Q evaluations can become large.
+    n_events = Int(get(eh, "n_events", get(eh, "samples_per_cut", 5000)))
+    rng_seed = Int(get(eh, "seed", get(controls["common"], "seed", 20260611)))
+    apply_momentum_resolution = Bool(get(eh, "apply_momentum_resolution", true))
+    resolution_nsigma_clip = Float64(get(eh, "resolution_nsigma_clip", Inf))
+    max_q_samples = Int(get(eh, "max_q_samples", 200000))
 
     return (; enabled, mode, use_scan_q_columns, n_measured_h, n_measured_k,
-        n_measured_l, measured_grid_mode, max_q_samples)
+        n_measured_l, measured_grid_mode, n_events, rng_seed,
+        apply_momentum_resolution, resolution_nsigma_clip, max_q_samples)
 end
 
 function sv_kpm_1d_q_average_offsets(controls::Dict)
@@ -1951,6 +1962,42 @@ function sv_uniform_grid_axis_1d(n::Integer, range_tuple::Tuple{Float64,Float64}
     return (xs, ws)
 end
 
+
+function sv_stable_string_code(s::AbstractString)
+    # Avoid Julia's randomized hash seed so Monte Carlo Q samples are
+    # reproducible across sessions and machines.
+    h = UInt64(1469598103934665603)  # FNV offset basis
+    for b in codeunits(String(s))
+        h = (h ⊻ UInt64(b)) * UInt64(1099511628211)
+    end
+    return Int(mod(h, UInt64(2_000_000_000)))
+end
+
+function sv_kpm_1d_histogram_rng(controls::Dict, cut::SVNeutronCut1D)
+    eh = sv_kpm_1d_experimental_histogram_controls(controls)
+    field_code = round(Int, 1000 * cut.field_T)
+    seed = eh.rng_seed + 1009 * field_code + 9176 * sv_stable_string_code(cut.qtag)
+    return MersenneTwister(mod(seed, typemax(Int32)))
+end
+
+function sv_uniform_random_in_range(rng::AbstractRNG, range_tuple::Tuple{Float64,Float64})
+    lo, hi = range_tuple
+    return lo + rand(rng) * (hi - lo)
+end
+
+function sv_randn_resolution_offset(rng::AbstractRNG, sigma::Real, clip_nsigma::Real)
+    σ = Float64(sigma)
+    if !(isfinite(σ) && σ > 0)
+        return 0.0
+    end
+    z = randn(rng)
+    cn = Float64(clip_nsigma)
+    if isfinite(cn) && cn > 0
+        z = clamp(z, -cn, cn)
+    end
+    return σ * z
+end
+
 function sv_kpm_1d_q_sampler(cut::SVNeutronCut1D, controls::Dict)
     eh = sv_kpm_1d_experimental_histogram_controls(controls)
     qavg = sv_kpm_1d_q_average_offsets(controls)
@@ -1972,6 +2019,25 @@ function sv_kpm_1d_q_sampler(cut::SVNeutronCut1D, controls::Dict)
         end
         cut_label = ranges.label
         measured_mode = :analytical_cut_volume_grid
+    elseif eh.enabled && eh.mode in (:analytical_cut_volume_mc, :expensive_event_mc, :event_style_cut_volume_mc)
+        ranges = sv_1d_analytical_cut_ranges(cut.qtag)
+        rng = sv_kpm_1d_histogram_rng(controls, cut)
+        Ne = eh.n_events
+        Ne > 0 || error("[kpm.experimental_histogram].n_events must be positive for mode=$(eh.mode)")
+        for _ in 1:Ne
+            Hm = sv_uniform_random_in_range(rng, ranges.H)
+            Km = sv_uniform_random_in_range(rng, ranges.K)
+            Lm = sv_uniform_random_in_range(rng, ranges.L)
+            if eh.apply_momentum_resolution && qavg.enabled
+                Hm += sv_randn_resolution_offset(rng, qavg.sigma_H, eh.resolution_nsigma_clip)
+                Km += sv_randn_resolution_offset(rng, qavg.sigma_K, eh.resolution_nsigma_clip)
+                Lm += sv_randn_resolution_offset(rng, qavg.sigma_L, eh.resolution_nsigma_clip)
+            end
+            push!(measured_qs, [Float64(Hm), Float64(Km), Float64(Lm)])
+            push!(measured_weights, 1.0 / Ne)
+        end
+        cut_label = ranges.label
+        measured_mode = :analytical_cut_volume_mc
     else
         push!(measured_qs, sv_kpm_1d_q_center(cut, controls))
         push!(measured_weights, 1.0)
@@ -1980,9 +2046,18 @@ function sv_kpm_1d_q_sampler(cut::SVNeutronCut1D, controls::Dict)
 
     qs = Vector{Vector{Float64}}()
     weights = Float64[]
-    for (im, qm) in enumerate(measured_qs), (ioff, off) in enumerate(qavg.offsets)
-        push!(qs, Float64.(qm) .+ off)
-        push!(weights, measured_weights[im] * qavg.weights[ioff])
+    if measured_mode == :analytical_cut_volume_mc
+        # Each Monte Carlo sample is already a true-Q event: measured cut-volume
+        # sampling plus random momentum-resolution kick.  Do not multiply by the
+        # deterministic q_averaging grid again, otherwise the configured n_events
+        # would not equal the actual number of Sunny Q evaluations.
+        append!(qs, measured_qs)
+        append!(weights, measured_weights)
+    else
+        for (im, qm) in enumerate(measured_qs), (ioff, off) in enumerate(qavg.offsets)
+            push!(qs, Float64.(qm) .+ off)
+            push!(weights, measured_weights[im] * qavg.weights[ioff])
+        end
     end
 
     sw = sum(weights)
@@ -2021,6 +2096,10 @@ function sv_kpm_1d_q_sampler(cut::SVNeutronCut1D, controls::Dict)
         measured_n_h = eh.n_measured_h,
         measured_n_k = eh.n_measured_k,
         measured_n_l = eh.n_measured_l,
+        n_events = eh.n_events,
+        rng_seed = eh.rng_seed,
+        apply_momentum_resolution = eh.apply_momentum_resolution,
+        resolution_nsigma_clip = eh.resolution_nsigma_clip,
         max_q_samples = eh.max_q_samples,
     )
 end
@@ -2258,7 +2337,7 @@ function sv_run_kpm_1d(repo_root::AbstractString; controls=sv_load_controls(repo
     er1d = sv_energy_resolution_controls(controls; section="kpm")
     qavg1d = sv_kpm_1d_q_average_offsets(controls)
     eh1d = sv_kpm_1d_experimental_histogram_controls(controls)
-    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode energy_resolution_enabled=er1d.enabled energy_resolution_mode=er1d.mode energy_resolution_subtract_kpm_kernel=er1d.subtract_kpm_kernel q_average_enabled=qavg1d.enabled q_average_samples=qavg1d.n_samples sigma_H_rlu=qavg1d.sigma_H sigma_K_rlu=qavg1d.sigma_K sigma_L_rlu=qavg1d.sigma_L experimental_histogram_enabled=eh1d.enabled experimental_histogram_mode=eh1d.mode use_scan_q_columns=eh1d.use_scan_q_columns sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts) form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
+    @info "KPM comparison convention" scale_mode scale_scope fallback_neutron_scale flat_to_dispersive_fraction flat_weight histogram_mode=hist_mode energy_resolution_enabled=er1d.enabled energy_resolution_mode=er1d.mode energy_resolution_subtract_kpm_kernel=er1d.subtract_kpm_kernel q_average_enabled=qavg1d.enabled q_average_samples=qavg1d.n_samples sigma_H_rlu=qavg1d.sigma_H sigma_K_rlu=qavg1d.sigma_K sigma_L_rlu=qavg1d.sigma_L experimental_histogram_enabled=eh1d.enabled experimental_histogram_mode=eh1d.mode expensive_n_events=eh1d.n_events expensive_apply_momentum_resolution=eh1d.apply_momentum_resolution expensive_resolution_nsigma_clip=eh1d.resolution_nsigma_clip max_q_samples=eh1d.max_q_samples use_scan_q_columns=eh1d.use_scan_q_columns sunny_transverse_gxy dims=kpm_sizectl.dims repeat_factor=kpm_sizectl.repeat_factor system_size=kpm_sizectl.system_size J1_bonds=sv_offset_string(sv_j1_shell_offsets()) J2_bonds=sv_offset_string(sv_j2_shell_offsets()) data_cuts=length(cuts) form_factor_enabled=ffctl.enabled form_factor_source=ffctl.source form_factor_ion=ffctl.ion form_factor_candidates=ffctl.candidate_ions form_factor_manual_include_j2=ffctl.include_j2 form_factor_manual_apply_as=ffctl.apply_as form_factor_a_A=fflat.a_A form_factor_c_A=fflat.c_A
 
     # First compute all unscaled Sunny spectra on the experimental energy grids.
     # The neutron intensity scale can then be either fixed, fitted globally, or

@@ -245,24 +245,38 @@ grid_nsigma = 1.5
 # Optional 1D event-style / analytical-cut-volume Q histogram approximation.
 #
 # mode = "cut_center_plus_resolution_grid"
-#   The cheaper previous mode: one measured Q center per qtag, then apply
-#   [kpm.q_averaging] momentum-resolution offsets.
+#   The cheapest previous mode: one measured Q center per qtag, then apply
+#   [kpm.q_averaging] deterministic momentum-resolution offsets.
 #
 # mode = "analytical_cut_volume_grid"
-#   New event-style approximation: sample measured Q inside the same nominal
+#   Deterministic grid approximation: sample measured Q inside the same nominal
 #   1D cut boxes used by the analytical histogrammer, then apply the
-#   [kpm.q_averaging] momentum-resolution offsets around every measured-Q
-#   sample.  This is closer to the analytical event histogrammer but can be
-#   much slower.  Total Sunny q points per cut = n_measured_h*n_measured_k*
-#   n_measured_l*n_h*n_k*n_l.
+#   [kpm.q_averaging] deterministic offsets around every measured-Q sample.
+#   Total Sunny q points per cut = n_measured_h*n_measured_k*n_measured_l*
+#   n_h*n_k*n_l.
+#
+# mode = "analytical_cut_volume_mc"
+#   Expensive/event-style mode: draw n_events measured-Q points uniformly inside
+#   the analytical 1D cut volume and apply a random Gaussian momentum-resolution
+#   kick to each event.  This is the closest 1D analogue of the analytical
+#   event histogrammer currently wired into Sunny KPM.  Cost scales directly as
+#   n_events Sunny q points per cut, per component, per field.
 enabled = true
-mode = "analytical_cut_volume_grid"
+mode = "analytical_cut_volume_mc"
 use_scan_q_columns = true
+
+# Deterministic grid mode controls.
 measured_grid_mode = "uniform_grid"
 n_measured_h = 3
 n_measured_k = 3
 n_measured_l = 1
-max_q_samples = 5000
+
+# Expensive Monte Carlo event mode controls.
+n_events = 5000
+seed = 20260612
+apply_momentum_resolution = true
+resolution_nsigma_clip = 3.0
+max_q_samples = 200000
 
 [kpm.energy_resolution]
 # Optional post-KPM energy-resolution deposition for 1D Sunny cuts.
