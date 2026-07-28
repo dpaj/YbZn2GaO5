@@ -1,0 +1,125 @@
+# configs/analytical_histogram_grid_convergence_controls.toml
+#
+# Deterministic-grid convergence study for the analytical 1D neutron
+# histogrammer.  This tests whether modest H/K measured-Q and momentum-
+# resolution grids can reproduce the high-statistics Monte Carlo analytical
+# histogram.  The default intentionally keeps L at the cut center because the
+# field-polarized triangular-lattice dispersion has no L dependence.
+
+[reference]
+label = "MC_500000"
+mc_n_samples_per_cut = 500000
+
+[sampling]
+seed = 2026
+
+[model]
+S = 0.5
+J_units = "fractional"
+correlate_J1_J2 = false
+use_form_factor = true
+include_j2_formfactor = true
+include_kfki = true
+polarization = "transverse_c"
+
+[comparison]
+components = ["total", "dispersive", "flat"]
+
+[output]
+table_subdir = "results/feature_tables/analytical_histogram_grid_convergence"
+figure_subdir = "results/figures/analytical_histogram_grid_convergence"
+
+[plotting]
+make_plots = true
+overlay_labels = ["MC_500000", "grid_3x3_meas_3x3_res", "grid_5x5_meas_5x5_res", "grid_9x9_meas_5x5_res"]
+
+# Each grid config uses:
+#   n_measured_h * n_measured_k * n_measured_l
+# measured-Q points inside the 1D cut volume, and
+#   n_resolution_h * n_resolution_k * n_resolution_l
+# Gaussian momentum-resolution points around each measured point.
+#
+# By default n_measured_l = n_resolution_l = 1.  This deliberately avoids an L
+# grid; L enters only weakly through form factor/polarization in this effective
+# model, not through the dispersion.
+#
+# n_disorder_per_q controls stochastic averaging of the analytical g/J disorder
+# at each deterministic Q point.  This is analytical-only and cheap; for Sunny,
+# the corresponding real-space disorder is handled by the finite supercell.
+
+[[grid.configs]]
+label = "grid_1x1_meas_1x1_res"
+n_measured_h = 1
+n_measured_k = 1
+n_measured_l = 1
+n_resolution_h = 1
+n_resolution_k = 1
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 64
+
+[[grid.configs]]
+label = "grid_3x3_meas_1x1_res"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+n_resolution_h = 1
+n_resolution_k = 1
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 64
+
+[[grid.configs]]
+label = "grid_3x3_meas_3x3_res"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+n_resolution_h = 3
+n_resolution_k = 3
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 32
+
+[[grid.configs]]
+label = "grid_5x5_meas_3x3_res"
+n_measured_h = 5
+n_measured_k = 5
+n_measured_l = 1
+n_resolution_h = 3
+n_resolution_k = 3
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 32
+
+[[grid.configs]]
+label = "grid_5x5_meas_5x5_res"
+n_measured_h = 5
+n_measured_k = 5
+n_measured_l = 1
+n_resolution_h = 5
+n_resolution_k = 5
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 16
+
+[[grid.configs]]
+label = "grid_7x7_meas_5x5_res"
+n_measured_h = 7
+n_measured_k = 7
+n_measured_l = 1
+n_resolution_h = 5
+n_resolution_k = 5
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 16
+
+[[grid.configs]]
+label = "grid_9x9_meas_5x5_res"
+n_measured_h = 9
+n_measured_k = 9
+n_measured_l = 1
+n_resolution_h = 5
+n_resolution_k = 5
+n_resolution_l = 1
+resolution_nsigma = 3.0
+n_disorder_per_q = 8
