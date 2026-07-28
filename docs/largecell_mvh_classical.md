@@ -477,6 +477,109 @@ frustrate. Two independent diagnostics agreeing is worth more than either alone.
   `sigma_J` moves substantially, since the texture conclusion in particular is a
   statement about that disorder level.
 
+## What M(H) can and cannot constrain
+
+```text
+scripts/map_mvh_landscape.jl
+configs/mvh_landscape_controls.toml
+```
+
+Run **with threads** — realizations are independent and that is the whole speedup:
+
+```powershell
+julia -t auto --project=. scripts/map_mvh_landscape.jl
+```
+
+Mapped before optimizing, because M(H) is one smooth monotonic digitized curve
+with no error bars against a five-parameter nonlinear model, and an optimizer
+would happily return a confident point out of a flat valley. The two parameters
+the model is linear in, `A_M` and the Van Vleck slope, are profiled out
+analytically at every grid point by nonnegative least squares
+(`sv_best_two_component_scale`), so this maps the **shape** residual only — which
+also makes it immune to the suspected normalization problem in the data.
+
+1207 s for 299 objective evaluations at 12x12x1, 16 realizations, 18 field points.
+Threading over realizations makes 16 realizations cost the same wall clock as one.
+
+### Reproducibility floor
+
+Swapping the realization set from 0:15 to 16:31 at fixed parameters moves the rms
+by **0.00259 uB**. Nothing smaller than that is meaningful, so it is the yardstick
+for calling a direction flat, and it is what the contours in the figure mark.
+
+### sigma_J is the flat direction — M(H) cannot constrain it
+
+| parameter | scan range | best | rms range | verdict |
+|---|---|---|---|---|
+| J1_meV | 0.12-0.45 | 0.186 | 0.0455 | constrained |
+| gzz | 2.0-5.5 | 4.8 | 0.0300 | constrained |
+| sigma_gzz | 0.0-1.6 | 0.96 | 0.0276 | constrained |
+| J2_meV | 0.0-0.06 | 0.0 | 0.0110 | weakly, prefers 0 |
+| **sigma_J** | **0.0-1.0** | **0.3** | **0.0070** | **FLAT** |
+
+Across the entire physical range `sigma_J = 0` to `1`, the rms moves by 0.0070 uB,
+only 2.7x the reproducibility floor, and 30% of the scan lies within one floor of
+the best. **M(H) has essentially no opinion about the exchange disorder width.**
+
+This dissolves a tension flagged earlier in this project. M(H) appeared to prefer
+`sigma_J = 0.5` while the neutron work was exploring 0.72 — but M(H) does not
+actually prefer anything, so there is no conflict to reconcile. `sigma_J` has to
+be set by the spectra.
+
+The physics is sensible. `sigma_gzz` disorders the **moment** itself, `g_i S`, so it
+spreads local saturation fields and local moments and acts on M(H) at first order.
+`sigma_J` disorders the **exchange**, whose effect on the uniform magnetization
+largely averages out on a frustrated lattice. For the neutron spectra it is the
+other way round: `sigma_J` broadens the dispersion through mode mixing, which is
+exactly the knob the by-eye neutron fits needed more of.
+
+**The two observables are complementary rather than redundant**, which is the ideal
+situation for a co-optimization: M(H) pins the saturation field and `sigma_gzz`,
+the spectra pin `sigma_J` and the absolute energy scale.
+
+### The degenerate direction is the saturation field
+
+The predicted `sigma_J`-`sigma_gzz` degeneracy did **not** appear — they are not
+trading off, `sigma_gzz` simply does the work and `sigma_J` is irrelevant. Within
+twice the floor, `sigma_gzz` is confined to 0.96-1.12 (16% relative spread) while
+`sigma_J` roams over 0-0.3 (233%).
+
+The predicted `J1`-`gzz` degeneracy **did** appear, and it is the constant
+saturation-field direction. Within twice the floor:
+
+| quantity | relative spread |
+|---|---|
+| J1 alone | 0.58 |
+| gzz alone | 0.47 |
+| **J1/gzz** | **0.26** |
+
+The ratio is about twice as well determined as either parameter, because
+`B_sat = S*D_max(J1,J2)/(gzz*mu_B)` is what the curve actually sees once the moment
+amplitude is profiled out. Expressed as that invariant, every good fit agrees:
+
+| point | J1 | gzz | B_sat (T) | rms |
+|---|---|---|---|---|
+| by-eye centre | 0.250 | 3.80 | 5.11 | 0.0202 |
+| 1D J1 best | 0.186 | 3.80 | 3.81 | 0.0053 |
+| 1D gzz best | 0.250 | 4.80 | 4.05 | 0.0058 |
+| 2D (J1,gzz) best | 0.219 | 4.10 | 4.15 | 0.0047 |
+
+**M(H) wants a saturation field near 4 T, where the by-eye neutron parameters put
+it at 5.1 T.** Moving there drops the rms from 0.0202 to 0.0047, a factor of 4.3,
+and it is a genuine constraint rather than a scale artifact since `A_M` is profiled
+out throughout.
+
+### Caveats
+
+- The 1D scans move one parameter at a time from the by-eye centre, so those
+  "best" values are conditional on the others. The 2D (J1, gzz) map is the more
+  trustworthy joint statement, and the full five-parameter optimum may shift again.
+- `J2` is reported as constrained only because its rms range clears 3x the floor;
+  its best is at the boundary `J2 = 0` and 40% of its scan is within one floor. Treat
+  it as weakly constrained and preferring zero.
+- Everything is at 12x12x1. The optimum should be re-evaluated at 36x36x1 with
+  different seeds before being believed.
+
 ## Open items
 
 - The measurement temperature is unreconciled: 0.42 K in the control TOMLs,

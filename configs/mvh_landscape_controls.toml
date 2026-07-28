@@ -1,0 +1,95 @@
+# M(H) objective landscape: what can this observable actually constrain?
+#
+# Run WITH THREADS — realizations are independent and that is the whole speedup:
+#   julia -t auto --project=. scripts/map_mvh_landscape.jl
+#
+# The objective is the shape-only rms residual against the digitized M(H) curve,
+# with the two parameters the model is LINEAR in (A_M and the Van Vleck slope)
+# profiled out analytically at every grid point by nonnegative least squares.
+# Profiling A_M out is what makes the map insensitive to the suspected
+# normalization problem in the data.
+#
+# Protocol is the one settled by scripts/check_mvh_convergence.jl: T = 0
+# minimize_energy!, field-polarized start, adiabatic field continuation, fixed
+# realizations (common random numbers) so the objective is deterministic in the
+# parameters rather than noisy.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/mvh_landscape"
+table_subdir = "results/feature_tables/sunny_validation/mvh_landscape"
+
+[run]
+# 12x12x1 is defensible on every bias diagnostic measured: hysteresis 0.0037 uB
+# for B > 0, texture correlation length resolved and short, commensurability
+# irrelevant. Scatter falls as N^-0.38 while cost grows as N^1.40, so accuracy is
+# bought with realizations rather than cell size.
+cell_size = [12, 12, 1]
+seed_dims = [3, 3, 1]
+
+# 16 realizations threaded over 32 cores costs the same wall clock as 1.
+n_realizations = 16
+realization_offset = 0
+threaded = true
+
+# Field grid kept inside the measured range (0.0225 to 6.975 T) so no point
+# interpolates to NaN. 18 points is plenty for a residual on a smooth curve.
+Bmin_T = 0.2
+Bmax_T = 6.8
+nB = 18
+
+minimize_maxiters = 30000
+
+# Default scan half-width as a fraction of the centre value, where no explicit
+# absolute range is given below.
+relative_span = 0.6
+
+[run.scan1d]
+enabled = true
+parameters = ["J1_meV", "sigma_J", "gzz", "sigma_gzz", "J2_meV"]
+n_points = 11
+
+[run.scan1d.absolute_ranges]
+# Disorder widths are meaningful from zero upward, so scan them absolutely rather
+# than as a fraction of the current value.
+sigma_J = [0.0, 1.0]
+sigma_gzz = [0.0, 1.6]
+J1_meV = [0.12, 0.45]
+gzz = [2.0, 5.5]
+J2_meV = [0.0, 0.06]
+
+[run.scan2d]
+enabled = true
+n_points = 11
+# The two pairs predicted to be degenerate:
+#   sigma_J / sigma_gzz  both round the saturation and add initial slope
+#   J1 / gzz             enter together through B_sat = S*D_max/(gzz*mu_B), and
+#                        with A_M profiled out the moment scale adds nothing
+pairs = [["sigma_J", "sigma_gzz"], ["J1_meV", "gzz"]]
+
+[run.scan2d.absolute_ranges]
+sigma_J = [0.0, 1.0]
+sigma_gzz = [0.0, 1.6]
+J1_meV = [0.12, 0.45]
+gzz = [2.0, 5.5]
+
+# --- centre point ----------------------------------------------------------
+# NOTE: must stay at the end of [run] — TOML requires a subtable to follow the
+# parent table's bare keys.
+#
+# The by-eye Sunny-KPM parameter set, matching the M(H,T) workflow config.
+[run.param_overrides]
+J1_meV = 0.25
+J2_meV = 0.01
+sigma_J = 0.5
+gzz = 3.8
+sigma_gzz = 0.8
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.largecell]
+include_exchange_disorder = true
+include_gzz_disorder = true

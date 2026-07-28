@@ -1062,6 +1062,130 @@ function sv_anneal_to_ground_state!(sys; kT_high::Real, kT_low::Real,
     return sys
 end
 
+# -----------------------------------------------------------------------------
+# M(H) objective for landscape mapping and optimization.
+#
+# Protocol fixed by scripts/check_mvh_convergence.jl: T = 0 minimize_energy! from
+# a field-polarized start with adiabatic field continuation, averaged over a FIXED
+# set of disorder realizations (common random numbers) so the objective is a
+# deterministic function of the parameters rather than a noisy one.
+# -----------------------------------------------------------------------------
+
+"""
+    sv_mvh_curve(params, controls; kwargs...)
+
+Disorder-averaged M(H) at T = 0, in uB per site, before any scale is applied.
+
+Threaded over realizations, which are fully independent. Requires `julia -t auto`
+to see any speedup. Only the field-polarized start is used, deliberately: the
+`random` and `annealed` starts touch Julia's global RNG and would not be
+thread-safe here.
+"""
+function sv_mvh_curve(params, controls::Dict;
+        cell_size=(12, 12, 1), seed_dims=(3, 3, 1), realizations=0:7,
+        Bs=collect(range(0.2, 6.8; length=18)), maxiters::Int=30_000,
+        include_exchange::Bool=true, include_gzz::Bool=true, threaded::Bool=true)
+    uhat = sv_field_direction(controls)
+    units = sv_units()
+    moment_sign = Float64(get(get(controls, "largecell", Dict{String,Any}()),
+                              "moment_sign", -1.0))
+    Bv = collect(Float64.(Bs))
+    rs = collect(realizations)
+    M = zeros(Float64, length(Bv), length(rs))
+
+    function run_one(ri::Int)
+        sys = sv_build_supercell_system(params, controls; component=:dispersive,
+            cell_size, seed_dims, field_T=0.0, realization=rs[ri],
+            include_exchange, include_gzz).sys
+        sv_polarize_along_field!(sys, uhat; field_T=1.0)
+        for (i, B) in enumerate(Bv)
+            sv_set_field_T!(sys, uhat, units, B)
+            minimize_energy!(sys; maxiters)
+            M[i, ri] = moment_sign * sv_m_parallel_uB_per_site(sys, uhat)
+        end
+        return nothing
+    end
+
+    seconds = @elapsed begin
+        if threaded && Threads.nthreads() > 1 && length(rs) > 1
+            Threads.@threads for ri in eachindex(rs)
+                run_one(ri)
+            end
+        else
+            for ri in eachindex(rs)
+                run_one(ri)
+            end
+        end
+    end
+
+    mu = vec(mean(M; dims=2))
+    sd = length(rs) > 1 ? vec(std(M; dims=2)) : zeros(length(Bv))
+    return (; Bs=Bv, M_mean=mu, M_std=sd, M_all=M,
+              n_realizations=length(rs), seconds)
+end
+
+"""
+    sv_best_two_component_scale(y, x1, x2)
+
+Nonnegative least squares for `y ~ a*x1 + b*x2`. Used to profile out the two
+parameters the model is LINEAR in — the moment amplitude `A_M = a` and the Van
+Vleck slope, recovered as `b/a` — so that only the genuinely nonlinear parameters
+(J1, J2, sigma_J, gzz, sigma_gzz) remain for an optimizer to search.
+
+Profiling `A_M` out is also what makes the objective insensitive to the suspected
+normalization problem in the digitized data: only the SHAPE of M(H) is fitted.
+"""
+function sv_best_two_component_scale(y, x1, x2)
+    m = isfinite.(y) .& isfinite.(x1) .& isfinite.(x2)
+    any(m) || return (1.0, 0.0)
+    yv, u, v = Float64.(y[m]), Float64.(x1[m]), Float64.(x2[m])
+    a11, a12, a22 = sum(u .^ 2), sum(u .* v), sum(v .^ 2)
+    b1, b2 = sum(yv .* u), sum(yv .* v)
+    det = a11 * a22 - a12^2
+    onec(t) = (s = sum(t .^ 2); s > 0 ? max(0.0, sum(yv .* t) / s) : 0.0)
+    abs(det) < 1e-300 && return (onec(u), 0.0)
+    a = (b1 * a22 - b2 * a12) / det
+    b = (b2 * a11 - b1 * a12) / det
+    (a >= 0 && b >= 0) && return (a, b)
+    aa, bb = onec(u), onec(v)
+    return sum((yv .- aa .* u) .^ 2) <= sum((yv .- bb .* v) .^ 2) ? (aa, 0.0) : (0.0, bb)
+end
+
+"""
+    sv_mvh_target(repo_root, controls, Bs)
+
+Experimental M(H) interpolated onto `Bs`. Keep `Bs` inside the measured range
+(0.0225-6.975 T) or the edges come back as NaN; the objective masks them anyway.
+"""
+function sv_mvh_target(repo_root::AbstractString, controls::Dict, Bs)
+    data = sv_read_magnetization_csv(sv_repo_path(repo_root, controls["paths"]["magnetization_csv"]))
+    return Float64.(sv_interp1(data.B_T, data.M_muB_per_Yb, collect(Float64.(Bs))))
+end
+
+"""
+    sv_mvh_objective(params, controls, Bs, M_exp; kwargs...)
+
+Shape-only M(H) residual with `A_M` and the Van Vleck slope profiled out by
+nonnegative least squares. Returns `rms` and `max_abs` in uB/Yb plus the fitted
+`A_M` and `chi_vv`, and `nan_fraction` so a caller can notice a failed evaluation
+rather than silently fitting nothing.
+"""
+function sv_mvh_objective(params, controls::Dict, Bs, M_exp; kwargs...)
+    cur = sv_mvh_curve(params, controls; Bs, kwargs...)
+    raw = cur.M_mean
+    a, b = sv_best_two_component_scale(M_exp, raw, cur.Bs)
+    model = a .* raw .+ b .* cur.Bs
+    res = model .- M_exp
+    ok = isfinite.(res)
+    n = count(ok)
+    return (; rms = n > 0 ? sqrt(mean(res[ok] .^ 2)) : NaN,
+              max_abs = n > 0 ? maximum(abs, res[ok]) : NaN,
+              A_M = a, chi_vv = a > 0 ? b / a : NaN,
+              model, residual=res, raw, M_std=cur.M_std, Bs=cur.Bs,
+              nan_fraction = 1 - n / length(res), seconds=cur.seconds,
+              n_realizations=cur.n_realizations)
+end
+
 function sv_sweep_largecell_component(params, controls::Dict; component::Symbol, Bs_T, dims, repeat_factor, include_exchange_disorder::Bool, include_gzz_disorder::Bool, maxiters::Int)
     # Build at zero field, then continue field sweep.
     base = sv_build_effective_sunny_system(params, controls; component, dims, field_T=0.0)
