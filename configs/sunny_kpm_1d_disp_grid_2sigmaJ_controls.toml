@@ -46,7 +46,9 @@ initial_spin_state = "field_polarized"
 relax_ground_state = true
 
 plot_ylim = [-0.0005, 0.0030]
-title_suffix = "Sunny KPM dispersive only: 5×5 measured × 5×5 resolution, 2×σJ, 1×σgzz"
+# title_suffix intentionally NOT set: the script builds the title from the actual
+# sigma multipliers. A hardcoded string here went stale (it read "2x sigma_J" while
+# the multipliers were 3.0 and 2.0), which would mislabel a published figure.
 
 [control_overrides.common]
 fields_T = [9.0, 14.0]
@@ -62,7 +64,10 @@ include_gzz_disorder = true
 energy_min_meV = 0.0
 energy_max_meV = 4.0
 n_energy = 161
-kernel_fwhm_meV = 0.08
+# 0.08 is wider than the CNCS resolution above ~2.7 meV, where the quadrature
+# subtraction in subtract_kpm_kernel has nothing left to remove and the model stays
+# over-broadened. 0.06 is valid across the [0.5, 3.0] meV fit window.
+kernel_fwhm_meV = 0.06
 tol = 0.05
 maxiters = 50000
 

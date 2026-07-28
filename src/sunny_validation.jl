@@ -862,6 +862,103 @@ function sv_apply_disorder!(sys, params, controls::Dict; component::Symbol=:disp
     return sys
 end
 
+# -----------------------------------------------------------------------------
+# Script support. These were copy-pasted into five or six scripts before being
+# collected here; prefer them over local copies.
+# -----------------------------------------------------------------------------
+
+"Recursively merge `src` into `dest`, so nested TOML tables override key by key."
+function sv_deepmerge!(dest::Dict, src::Dict)
+    for (k, v) in src
+        if v isa Dict && haskey(dest, k) && dest[k] isa Dict
+            sv_deepmerge!(dest[k], v)
+        else
+            dest[k] = v
+        end
+    end
+    return dest
+end
+
+"""
+    sv_load_diagnostic_controls(repo_root, default_rel; env_var=nothing, args=ARGS)
+
+Load a per-script diagnostic TOML and deep-merge its `[control_overrides]` onto the
+base Sunny controls, redirecting `figure_subdir` / `table_subdir` if given.
+
+The config path is resolved from the first non-empty positional argument, then
+`env_var`, then `default_rel`, so a cheap smoke config can be substituted without
+editing the production one.
+"""
+function sv_load_diagnostic_controls(repo_root::AbstractString, default_rel::AbstractString;
+        env_var::Union{Nothing,AbstractString}=nothing, args=ARGS)
+    rel = default_rel
+    if !isempty(args) && !isempty(String(args[1]))
+        rel = String(args[1])
+    elseif env_var !== nothing && !isempty(get(ENV, env_var, ""))
+        rel = ENV[env_var]
+    end
+    diag_path = sv_repo_path(repo_root, rel)
+    isfile(diag_path) || error("Could not find controls: $diag_path")
+    diag = load_toml_config(diag_path)
+
+    base_rel = get(get(diag, "paths", Dict{String,Any}()), "base_controls_toml",
+                   "configs/sunny_validation_controls.toml")
+    base_path = sv_repo_path(repo_root, String(base_rel))
+    controls = load_toml_config(base_path)
+    haskey(diag, "control_overrides") && sv_deepmerge!(controls, diag["control_overrides"])
+    if haskey(diag, "paths")
+        for k in ("figure_subdir", "table_subdir")
+            haskey(diag["paths"], k) && (controls["paths"][k] = diag["paths"][k])
+        end
+    end
+    return (; diag, controls, diag_path, base_path)
+end
+
+"""
+    sv_apply_param_overrides(params, run) -> (params, applied)
+
+Apply `[run.param_overrides]` to a canonical parameter NamedTuple. Returns the
+modified parameters and a sorted list of human-readable "old -> new" strings, so a
+script can echo exactly what deviates from `best_fit_parameters.toml`. Errors on an
+unknown key rather than silently ignoring it.
+"""
+function sv_apply_param_overrides(params, run::Dict)
+    ov = get(run, "param_overrides", Dict{String,Any}())
+    (ov isa Dict && !isempty(ov)) || return (params, String[])
+    applied = String[]
+    kv = Dict{Symbol,Float64}()
+    for k in sort(collect(keys(ov)))
+        sym = Symbol(k)
+        hasproperty(params, sym) ||
+            error("[run.param_overrides] key '$k' is not a canonical model parameter")
+        push!(applied, @sprintf("%s: %.6g -> %.6g",
+            k, Float64(getproperty(params, sym)), Float64(ov[k])))
+        kv[sym] = Float64(ov[k])
+    end
+    return (merge(params, NamedTuple(kv)), applied)
+end
+
+"""
+    sv_write_rows_csv(path, rows; header=keys(rows[1]))
+
+Write a vector of NamedTuples as CSV. Strings have commas replaced with semicolons,
+Bools print as true/false, Integers print exactly, everything else via `%.10g`.
+"""
+function sv_write_rows_csv(path::AbstractString, rows::AbstractVector;
+                           header=isempty(rows) ? String[] : String.(collect(keys(rows[1]))))
+    mkpath(dirname(path))
+    open(path, "w") do io
+        println(io, join(header, ","))
+        for r in rows
+            println(io, join([v isa AbstractString ? replace(String(v), "," => ";") :
+                              v isa Bool ? string(v) :
+                              v isa Integer ? string(v) : @sprintf("%.10g", Float64(v))
+                              for v in values(r)], ","))
+        end
+    end
+    return path
+end
+
 function sv_m_parallel_uB_per_site(sys, uhat::SVector{3,Float64})
     acc = 0.0
     n = 0
@@ -1934,9 +2031,48 @@ function sv_energy_resolution_sigma_meV(E::Real, er)
     sigma_target = fwhm_target / 2.35482004503
     if er.subtract_kpm_kernel
         sigma_kpm = er.kernel_fwhm / 2.35482004503
+        if sigma_kpm > sigma_target
+            # The KPM kernel is already WIDER than the instrumental resolution at
+            # this energy, so the quadrature subtraction has nothing left to remove
+            # and the model spectrum stays over-broadened.  Clamping silently (as
+            # this did previously) hides a genuine resolution error: the CNCS table
+            # FWHM *falls* with energy transfer, from 0.155 meV at 0.5 meV to
+            # 0.055 meV at 4 meV, so a fixed kernel of 0.08 meV is too wide above
+            # roughly 2.7 meV.  Fix by lowering [kpm].kernel_fwhm_meV below the
+            # smallest target FWHM over the energy range actually used.
+            @warn "KPM kernel is wider than the instrumental resolution; model is over-broadened here and deposition cannot correct it. Lower [kpm].kernel_fwhm_meV." energy_meV = Float64(E) target_fwhm_meV = fwhm_target kernel_fwhm_meV = er.kernel_fwhm maxlog = 3
+        end
         sigma_target = sqrt(max(0.0, sigma_target^2 - sigma_kpm^2))
     end
     return max(er.min_sigma, sigma_target)
+end
+
+"""
+    sv_resolution_kernel_headroom(er; energies)
+
+Report whether the KPM kernel is narrow enough for the target resolution over
+`energies`. Returns the smallest target FWHM found, the energy where it occurs, and
+the largest kernel FWHM that would be valid everywhere on that range.
+
+Call this before a run rather than discovering the problem from warnings buried in
+the output. Cost of a narrower kernel scales as 1/fwhm, so this is a real
+speed-versus-correctness decision and should be made deliberately.
+"""
+function sv_resolution_kernel_headroom(er; energies)
+    (er.enabled && !(er.mode in (:none, :off, :disabled))) &&
+        return _resolution_headroom_aux(er, energies)
+    return (; ok=true, min_target_fwhm=NaN, at_energy=NaN,
+              max_valid_kernel_fwhm=NaN, n_bad=0)
+end
+
+function _resolution_headroom_aux(er, energies)
+    Es = Float64.(collect(energies))
+    targets = [er.mode in (:constant_fwhm, :constant) ? er.constant_fwhm :
+               sv_linear_interp_table(E, er.table) for E in Es]
+    i = argmin(targets)
+    n_bad = er.subtract_kpm_kernel ? count(t -> er.kernel_fwhm > t, targets) : 0
+    return (; ok=(n_bad == 0), min_target_fwhm=targets[i], at_energy=Es[i],
+              max_valid_kernel_fwhm=targets[i], n_bad, n_total=length(Es))
 end
 
 function sv_post_deposit_energy_resolution(E_model::AbstractVector{<:Real}, I_E_by_q::AbstractMatrix, E_target::AbstractVector{<:Real}, er)

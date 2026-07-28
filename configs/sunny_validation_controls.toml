@@ -106,6 +106,13 @@ normal_quad_n = 301
 normal_quad_zmax = 5.0
 
 [largecell]
+# NOTE: superseded. This section drives only the legacy
+# scripts/sunny_validate_magnetization_largecell.jl. The current M(H) workflow
+# (scripts/sunny_largecell_mvh_classical.jl and the mvh_* configs) carries its own
+# cell_size, and the convergence study settled on 12x12x1. The 4x4x1 below is far
+# too small for anything quantitative -- see docs/largecell_mvh_classical.md.
+# `moment_sign` and the include_*_disorder flags here ARE still read by the new
+# workflow, so do not delete this section.
 # Sunny minimize_energy! validation.  These are extrinsic finite-size calculator
 # controls, not fitted microscopic parameters.
 #
@@ -135,7 +142,15 @@ include_exchange_disorder = true
 include_gzz_disorder = true
 maxiters = 1000
 tol = 0.05
-kernel_fwhm_meV = 0.08
+# KPM kernel width. Cost scales as 1/fwhm, so this is a speed-versus-correctness
+# knob, but it is bounded from above by the instrument: the CNCS FWHM table in
+# [kpm.energy_resolution] FALLS with energy transfer, 0.155 meV at 0.5 meV down to
+# 0.055 meV at 4 meV. A kernel wider than the target cannot be corrected by
+# deposition -- subtract_kpm_kernel has nothing left to remove and the model stays
+# over-broadened. 0.08 was too wide above ~2.7 meV and was being silently clamped;
+# 0.06 is valid across the [0.5, 3.0] meV fitting window at ~1.3x the cost.
+# sv_resolution_kernel_headroom() reports the largest valid value for a given range.
+kernel_fwhm_meV = 0.06
 energy_min_meV = 0.0
 energy_max_meV = 4.0
 n_energy = 161
