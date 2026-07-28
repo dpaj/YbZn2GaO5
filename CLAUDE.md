@@ -26,7 +26,7 @@ docs/      the real documentation - see the reading order below
 results/   generated figures and tables — GITIGNORED, all regenerable
 scripts/   runnable entry points; scripts/dev holds benchmarks; scripts/legacy the old co-fit
 src/       sunny_validation.jl (large), feature_extraction.jl, parameters.jl
-test/      runtests.jl — 55 physics-invariant regression tests, ~21 s
+test/      runtests.jl — physics-invariant regression tests (see Housekeeping)
 ```
 
 `../references/` (a sibling of this repo, **not** tracked) holds the five key
@@ -129,8 +129,79 @@ so the objective is deterministic in the parameters. Validate any optimum at
    field-polarized. Hard: no polarized reference state, LSWT invalid, and classical
    statistics is a poor approximation at the 0.07 K neutron temperature.
 
+## Two-machine workflow — read this before touching git
+
+This repo is worked on from **two machines that share state only through GitHub**:
+
+- a **Windows desktop** (paths under `C:\Users\vdp\ORNL Dropbox\...`), and
+- **`neutrons-dgx01.ornl.gov`**, a *shared* Linux box with A100s, at
+  `~/repos/YbZn2GaO5`, driven over VS Code Remote-SSH.
+
+Remote is `github.com/dpaj/YbZn2GaO5`; work goes straight to `main`. There is no
+direct link between the two sessions, and **two separate Claude Code sessions run
+on the two machines and cannot see each other.** The human is the only channel
+between them, and this file is the only shared memory — per-machine Claude memory
+directories do not travel.
+
+Rules that follow from that:
+
+- **`git fetch` before reporting or reasoning about repo state.** `git status`
+  saying "up to date with 'origin/main'" only compares HEAD to the *locally cached*
+  remote ref. A box that has not fetched will report "up to date" while being many
+  commits behind. This has already caused confusion once.
+- **Commit and push before switching machines or ending a session.** Do not leave
+  work stranded on one side.
+- **Never assume the local working copy is current** if the other machine may have
+  been touched. Ask.
+- **Prefer `git pull --ff-only`.** It refuses rather than silently creating a merge
+  commit when the two sides have diverged, which is what you want when you cannot
+  see the other machine.
+- When both sides have work: **pull first, then commit.** Committing first makes the
+  box simultaneously ahead and behind for no reason.
+
+### Files that need care across machines
+
+- `CLAUDE.md` and `.claude/settings.json` are **shared project config** — push and
+  pull them like code. `.claude/settings.local.json` is machine-specific and is
+  ignored by this repo's `.gitignore` (deliberately not by a machine-local global
+  ignore, which would not travel).
+- **`Manifest.toml`, `envs/sunny-main/Manifest.toml`, `envs/sunny-kpm-gpu/Manifest.toml`
+  are tracked and will churn across OSes.** They carry 167-185 `_jll` deps, and the
+  CUDA artifacts in the GPU env resolve differently on Linux. `julia_version` is
+  pinned at 1.12.3, so a different Julia guarantees a diff. After running
+  `Pkg.instantiate()` on a second machine, **do not commit the churn** — use
+  `git checkout -- Manifest.toml` — or it ping-pongs forever.
+- There is **no `.gitattributes`**, and 111 tracked files carry CRLF in the index.
+  Renormalizing is a one-time noisy commit touching all of them, so it must be done
+  while *both* machines are clean and pulled immediately on the other side.
+- Three `scripts/legacy/*.jl` files have hardcoded `C:\Users\vdp\...` paths and will
+  fail on Linux. They are still in use, so the fix is to read an env var with the
+  Windows path as fallback, following the pattern already at
+  `plot_yzgo_2d_data_vs_model_legacy.jl:5910`
+  (`get(ENV, "YZGO_DATA_DIR", raw"C:\...")`). Note the data they want lives in
+  `YZGO/CNCS_data/`, **outside this repo**, so it must be copied to the DGX
+  separately.
+- `../references/` (13 MB of published PDFs) is outside the repo and must stay
+  untracked — it is a shared box, and they are copyrighted.
+
+### Which machine for what
+
+KPM is **memory-bandwidth bound**, so CPU threading saturates near 3x and the GPU
+is the only real lever. The Windows box has an RTX A2000 (6 GB, FP64 at 1/32 rate);
+the DGX has A100s (~5-7x the bandwidth, uncrippled FP64, no OOM ceiling, and
+multiple devices for genuine outer-loop parallelism). Heavy KPM belongs on the DGX;
+M(H) work is cheap enough anywhere.
+
 ## Housekeeping
 
-Run `julia --project=. test/runtests.jl` before committing; it is ~21 s and catches
-convention regressions. `git` remote is `github.com/dpaj/YbZn2GaO5`, work goes
-straight to `main`.
+Run `julia --project=. test/runtests.jl` before committing; it catches convention
+regressions. On a machine that has just pulled, also check `julia --version`
+against the manifests' 1.12.3 and run `Pkg.instantiate()` first.
+
+**Do not quote a fixed assertion count.** The suite's total is
+`39 + (number of files in configs/) + (2 if threaded)`, because the config testset
+asserts once per config file and the KPM-threading testset self-skips without
+threads. So it reads 53/55 on a 14-config tree and 54/56 on a 15-config one — all
+correct. Judge it by "all green, 0 failures", not by a number. Runtime is likewise
+machine-dependent (18-21 s on the Windows box, 34 s on the DGX), so it is not a
+regression signal either.

@@ -26,3 +26,18 @@ data/generated/
 # Local Sunny benchmark outputs
 sunny_kpm_core_benchmark_output/
 sunny_kpm_cpu_gpu_benchmark_output/
+
+# Claude Code project config.
+#   settings.json       IS tracked — shared project config, treat it like code
+#   settings.local.json is machine-specific and must NOT be shared
+# This rule has to live here rather than in a machine-local global ignore file,
+# because a global ignore does not travel between the Windows box and the DGX.
+.claude/settings.local.json
+
+# Scratch and log output. Anything genuinely worth keeping belongs in results/
+# (itself ignored) or in docs/.
+*.log
+*.tmp
+*.bak
+scratch/
+tmp/
