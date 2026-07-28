@@ -104,17 +104,31 @@ that M "begins to saturate at around 15 T", extrapolating back to a saturation
 moment of **2.1(1) uB** after removing the Van Vleck contribution. That implies
 `g_par = 2 * 2.1 = 4.2`, not 3.44.
 
-Three things line up around 4.2 rather than 3.44:
+**The M(H) fit here is NOT evidence on this question, and an earlier version of
+this document wrongly implied it was.** With `A_M` profiled out, `gzz` enters the
+shape only through `B_sat = S*D_max/(gzz*mu_B)`; its role as an amplitude
+(`M_sat = gzz*S`) is absorbed entirely by `A_M`. The same `B_sat = 3.96 T` is
+obtained by:
 
-- the pulsed-field saturation moment, 2.1(1) uB implies g_par ~ 4.2;
-- the M(H) shape fit here prefers gzz = 4.67 (though it really constrains
-  B_sat ~ 4.0 T, with gzz and J1 individually only half as well determined);
-- the 14 T dataset used for g_par = 3.44 is, on Wu et al.'s own evidence, not
-  saturated.
+| gzz | J1 needed (meV) | M_sat = gzz*S | shape |
+|---|---|---|---|
+| 3.04 | 0.1549 | 1.520 | identical |
+| 3.44 | 0.1752 | 1.720 | identical |
+| 4.67 | 0.2381 | 2.337 | identical |
+| 5.50 | 0.2802 | 2.750 | identical |
 
-If g_par is nearer 4.2 the crystal-field fit would need redoing with the revised
-constraint, its eigenvectors would change, and by the sum rule chi_VV would most
-likely come out *smaller* — widening the discrepancy above rather than closing it.
+So `gzz = 4.674` from the fit is one arbitrary point on a degenerate line, not a
+determination of g_par. The only residual sensitivity is second order: `sigma_gzz`
+is an absolute width, so the *relative* disorder `sigma_gzz/gzz` does affect the
+shape, which is why the 1D `gzz` scan was not perfectly flat. That is far too weak
+to adjudicate 3.44 against 4.2.
+
+The single genuinely independent piece of evidence is therefore the pulsed-field
+saturation moment of 2.1(1) uB. That is a matter for the literature to settle, and
+**it is not a reason to re-refine the crystal-field parameters on the strength of
+anything computed in this repository.** Noted only because g_par enters the CF fit
+as a constraint, and because by the Van Vleck sum rule a larger g_par would leave
+*less* room for chi_VV, widening the discrepancy above rather than closing it.
 
 ## Disorder caveat
 

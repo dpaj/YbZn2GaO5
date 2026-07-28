@@ -242,3 +242,96 @@ $env:SUNNY_KPM_TRACK_MEMORY="0"
 
 For the first successful Float64 test, CPU and GPU spectra should agree to numerical precision
 before using the GPU branch for scientific diagnostics.
+
+## 1D KPM energy-scan cost model (scripts/dev/benchmark_kpm_1d_scaling.jl)
+
+Run with `julia -t auto --project=. scripts/dev/benchmark_kpm_1d_scaling.jl`.
+Measured on the 36x36x1 disordered cell at the by-eye parameters (J1 = 0.25,
+sigma_J = 0.5, sigma_gzz = 0.8), 9 T, config tol = 0.05, kernel FWHM = 0.08 meV,
+161 energy points over 0-4 meV, 32 cores.
+
+### Cost scalings
+
+| knob | behaviour | lever? |
+|---|---|---|
+| number of q | strictly linear, 0.207-0.224 s per q | yes, the dominant one |
+| `tol` | cost ~ -log10(tol); 0.005 -> 0.05 is only 2.0x | weak |
+| kernel FWHM | cost ~ 1/fwhm; 0.08 -> 0.16 is 2.1x | **no, see below** |
+| n_energy | 4.5 s at 41 points, 6.1 s at 321 | essentially free |
+| ground state | 51-59 s once per field, amortized | no |
+
+`n_energy` being nearly free means the Chebyshev moments dominate and there is no
+reason to coarsen the energy axis.
+
+### The kernel FWHM is NOT free speed
+
+Cost really does go as 1/fwhm, but the CNCS resolution table in
+`[kpm.energy_resolution].fwhm_table_meV` *decreases* with energy transfer:
+0.155 meV at 0.5 meV falling to 0.055 meV at 4 meV. The KPM kernel of 0.08 meV is
+therefore **already wider than the instrument above about 2.7 meV**, where the
+`subtract_kpm_kernel` quadrature subtraction goes negative and is clamped by
+`min_sigma_meV`. Correctness wants a *finer* kernel at the top of the range, which
+costs more, not less. Within the [0.5, 3.0] meV fitting window a kernel of about
+0.06 meV would be safe, at roughly 1.3x the cost.
+
+### `tol = 0.05` is a bigger approximation than it looks
+
+Against a `tol = 0.005` reference on identical q points:
+
+| tol | speedup | rel rms error | peak error |
+|---|---|---|---|
+| 0.01 | 1.19x | 4.2% | 31% |
+| 0.02 | 1.49x | 5.8% | 39% |
+| 0.05 | 2.02x | 10.2% | 55% |
+| 0.1 | 2.56x | 14.5% | 74% |
+
+The configured `tol = 0.05` carries about 10% rms and 55% peak error. For eyeballing
+a lineshape that is tolerable; for a quantitative fit it is not, and tightening to
+0.01 costs only 1.7x.
+
+### CPU threading saturates at ~3x — the calculation is memory-bandwidth bound
+
+Sunny's KPM is serial internally, so q points can be threaded externally (one
+`SpinWaveTheoryKPM` per thread; `SpinWaveTheory` clones the system, so this is
+safe, and the threaded result is bit-identical to serial).
+
+| chunks | speedup | efficiency |
+|---|---|---|
+| 2 | 1.75x | 88% |
+| 4 | 2.88x | 72% |
+| 8 | 2.98x | 37% |
+| 16 | 2.95x | 18% |
+| 32 | 3.04x | 10% |
+
+Near-ideal at 2 threads, collapsing by 8, flat thereafter. Two candidate
+explanations were tested and **excluded**: serial cost is flat from BLAS = 1 to
+BLAS = 32 (so KPM is not BLAS-bound and there is no oversubscription), and
+`SpinWaveTheoryKPM` construction costs only 0.158 s, contributing ~1.5 s at 32
+chunks. What remains is **memory bandwidth**: the Chebyshev recursion streams the
+whole 2N x 2N problem once per moment, so a few cores saturate the memory
+controller and further cores buy nothing.
+
+Consequences:
+
+- Do not expect more than ~3x from CPU threading, and there is no point giving KPM
+  more than ~8 threads.
+- Parallelising the outer loop over cuts, fields or realizations instead will *not*
+  help, because the ceiling is a machine-level bandwidth limit rather than a
+  decomposition problem.
+- **This is why the GPU port matters.** GPU memory bandwidth is roughly an order of
+  magnitude higher than CPU, which is the likely origin of the 5-8x measured
+  elsewhere in this document. For KPM throughput it is the only effective lever.
+
+### Projected cost of a full 1D comparison
+
+Six cuts (3 qtags x 2 fields), using the measured 3.04x threaded plateau:
+
+| Q-sampling mode | q per cut | total q | serial | threaded |
+|---|---|---|---|---|
+| deterministic grid | 81 | 486 | 107 s | 35 s |
+| MC events (as configured) | 5000 | 30000 | 6599 s | 36 min |
+
+The deterministic grid is affordable as a fit objective; the MC mode as currently
+configured is not. **Nobody has yet checked whether 5000 MC events buys anything
+over the 81-point grid** — that Q-convergence study is the direct analogue of the
+M(H) realization-count study and is the prerequisite for a neutron objective.
