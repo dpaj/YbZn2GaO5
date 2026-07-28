@@ -580,6 +580,72 @@ out throughout.
 - Everything is at 12x12x1. The optimum should be re-evaluated at 36x36x1 with
   different seeds before being believed.
 
+## M(H)-only fit, and the Van Vleck question
+
+```text
+scripts/fit_mvh_only.jl
+configs/mvh_fit_controls.toml
+```
+
+Optimizes only what the landscape map showed M(H) can constrain — `J1`, `gzz`,
+`sigma_gzz` — holding `sigma_J` fixed (flat direction) and `J2` fixed (weakly
+constrained, prefers zero). Nelder-Mead, 309 evaluations, 1239 s.
+
+| | by-eye neutron | M(H)-only fit |
+|---|---|---|
+| J1_meV | 0.250 | 0.2383 |
+| gzz | 3.80 | 4.674 |
+| sigma_gzz | 0.80 | 0.9115 |
+| sigma_J | 0.50 (fixed) | 0.50 (fixed) |
+| **B_sat (T)** | **5.11** | **3.96** |
+| A_M | 0.6264 | 0.3712 |
+| chi_vv | 0.0000 | **0.0990** |
+| **rms (uB/Yb)** | **0.02022** | **0.00409** |
+
+A factor of 4.9 improvement, and the residual is only 1.6x the reproducibility
+floor of 0.00259 uB — i.e. the fit is at the resolution limit of a 16-realization
+ensemble, so the optimizer stopping on its iteration limit rather than a gradient
+criterion does not matter.
+
+**Not overfitted to the realization set.** Re-evaluating the optimum at 36x36x1
+with a disjoint seed set (realizations 100:103) gives rms 0.00377, A_M 0.3704,
+chi_vv 0.0999 — indistinguishable from the 12x12x1 fit. Cell size and realization
+choice are both confirmed irrelevant.
+
+### Van Vleck IS needed — an earlier claim in this document was wrong
+
+An earlier section reported that `chi_vv` "fits to exactly zero in every case."
+That was measured **at the by-eye parameters only** and does not generalize.
+Refitting the same Sunny curves with `chi_vv` forced to zero:
+
+| parameter set | rms, chi_vv free | rms, chi_vv = 0 | penalty | vs floor | verdict |
+|---|---|---|---|---|---|
+| by-eye neutron | 0.02022 | 0.02022 | 0.00000 | 0.0x | not needed |
+| M(H)-optimized | 0.00409 | 0.02731 | 0.02322 | **9.0x** | **needed** |
+
+At the optimum the Van Vleck term contributes 0.250 uB at 6.8 T, about 22% of the
+measured signal, and dropping it drives the residual to +0.03 uB in mid-field and
+-0.055 uB at the top field — far outside the floor.
+
+The reason the by-eye set did not need it is instructive: with `B_sat` too high at
+5.11 T, the disordered moment had not finished saturating by 7 T, so the exchange
+disorder was already supplying the high-field slope that Van Vleck should supply.
+Once `B_sat` drops to 3.96 T the moment saturates earlier and the residual rise
+from 4 to 7 T has to come from the linear term. `A_M` falls from 0.63 to 0.37 as
+Van Vleck takes over that share of the signal.
+
+**The fitted `chi_vv = 0.099 uB/T is close to the analytical co-fit value of
+0.0783`** (1.26x). So the analytical model's Van Vleck slope was roughly right, and
+the apparent "zero Van Vleck" result was an artifact of evaluating it at
+poorly-fitting parameters rather than a physical finding.
+
+### Caveat on interpreting J1 and gzz separately
+
+`J1 = 0.238` and `gzz = 4.67` should not be read as independent determinations.
+The landscape map showed the ratio is about twice as well determined as either, so
+the meaningful statement is `B_sat ~ 4.0 T`. Splitting it into J1 and gzz requires
+the neutron spectra, which set the absolute energy scale.
+
 ## Open items
 
 - The measurement temperature is unreconciled: 0.42 K in the control TOMLs,

@@ -1,0 +1,63 @@
+# Fit M(H) alone, and test whether the fit needs a Van Vleck term.
+#
+# Run WITH THREADS:
+#   julia -t auto --project=. scripts/fit_mvh_only.jl
+#
+# Only the parameters the landscape map showed M(H) can constrain are optimized.
+# From scripts/map_mvh_landscape.jl:
+#   J1_meV, gzz, sigma_gzz   constrained
+#   sigma_J                  FLAT over its entire physical range 0 to 1 (rms moves
+#                            by 2.7x the reproducibility floor), so it is held
+#                            fixed here. Letting an optimizer wander along a flat
+#                            direction produces a meaningless number.
+#   J2_meV                   weakly constrained, prefers 0; held fixed.
+#
+# Note J1 and gzz are individually only about half as well determined as their
+# ratio, since the curve really sees B_sat = S*D_max/(gzz*mu_B). Read the fitted
+# B_sat, not J1 and gzz separately.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/mvh_fit"
+table_subdir = "results/feature_tables/sunny_validation/mvh_fit"
+
+[run]
+cell_size = [12, 12, 1]
+seed_dims = [3, 3, 1]
+n_realizations = 16
+minimize_maxiters = 30000
+
+Bmin_T = 0.2
+Bmax_T = 6.8
+nB = 18
+
+free_parameters = ["J1_meV", "gzz", "sigma_gzz"]
+lower_bounds = [0.10, 2.0, 0.0]
+upper_bounds = [0.45, 6.0, 2.0]
+max_iterations = 120
+
+# Re-evaluate the optimum on a larger cell with a DIFFERENT set of disorder seeds,
+# since a fixed 16-realization set can be partly fitted.
+validate_large_cell = true
+validation_cell_size = [36, 36, 1]
+validation_realization_offset = 100
+validation_n_realizations = 4
+
+# --- starting point --------------------------------------------------------
+# NOTE: must stay at the end of [run] — TOML requires a subtable to follow the
+# parent table's bare keys.
+[run.param_overrides]
+J1_meV = 0.25
+J2_meV = 0.01
+sigma_J = 0.5
+gzz = 3.8
+sigma_gzz = 0.8
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.largecell]
+include_exchange_disorder = true
+include_gzz_disorder = true
