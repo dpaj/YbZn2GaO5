@@ -1,0 +1,120 @@
+# Convergence and protocol diagnostics for the large-cell M(H) model.
+#
+# Goal: choose the cell size, realization count, and relaxation protocol for an
+# M(H) optimizer inner loop on measured numbers rather than intuition, and answer
+# the "is the box big enough to hold the texture" question directly.
+#
+# Run with:
+#   julia --project=. scripts/check_mvh_convergence.jl
+#
+# Everything is T = 0 minimize_energy!. The M(H,T) study showed classical finite
+# temperature changes M(H) by less than the model-experiment residual at 0.42 K
+# (RMS 0.0182 vs 0.0176 uB), and dropping the thermostat makes the objective
+# deterministic given a disorder realization, which is what an optimizer needs.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/mvh_convergence"
+table_subdir = "results/feature_tables/sunny_validation/mvh_convergence"
+
+[run]
+temperature_K = 0.42
+seed_dims = [3, 3, 1]
+
+# sigma_J = 0.5 makes the landscape rugged, so give the minimizer room. The
+# 10000 default was hitting Sunny's non-convergence warning.
+minimize_maxiters = 30000
+
+# --- 1. realization scatter vs cell size, and tail shape -------------------
+# Does scatter fall as 1/sqrt(N_sites) (pure self-averaging, so partitioning is
+# free and many small cells is equivalent to one big one), or faster/slower?
+# And is the distribution over realizations Gaussian, or heavy-tailed because
+# rare weakly-coupled regions dominate? A heavy tail means mean +- std
+# understates the error and many more realizations are needed.
+[run.scaling]
+enabled = true
+cells = [[12, 12, 1], [24, 24, 1], [36, 36, 1]]
+n_realizations = 16
+fields_T = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0]
+initialization = "field_polarized"
+
+# --- 2. initialization sensitivity ----------------------------------------
+# The single most important check. minimize_energy! finds *a* local minimum, and
+# field-polarized starts bias every field point toward the uniform texture. If
+# M(H) depends on the start then the "ground state" is protocol dependent and no
+# cell size fixes it.
+[run.initialization]
+enabled = true
+cells = [[12, 12, 1], [36, 36, 1]]
+inits = ["field_polarized", "random", "annealed"]
+n_realizations = 4
+fields_T = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0]
+
+[run.annealing]
+# Cool from above the exchange scale (J1 = 0.25 meV) down to the measurement kT.
+kT_high_meV = 0.3
+kT_low_meV = 0.0362
+n_stages = 8
+n_steps = 400
+dt = 0.02
+damping = 0.1
+
+# --- 3. field-history dependence ------------------------------------------
+# Sweep up then back down. Any gap is direct evidence of metastability, which is
+# where domain physics would show up.
+[run.hysteresis]
+enabled = true
+cells = [[12, 12, 1], [36, 36, 1]]
+n_realizations = 4
+nB = 15
+Bmax_T = 7.0
+initialization = "field_polarized"
+
+# --- 4. ground-state texture vs cell size ---------------------------------
+# The direct answer to the domain-size question. Transverse static structure
+# factor on the supercell's own allowed q grid:
+#   width_rlu independent of L  => correlation length resolved, small cell OK
+#   width_rlu tracking 1/L      => resolution limited, xi exceeds the cell
+# Energy per site versus L is the supporting check: if domains matter, a larger
+# cell has more freedom to form favourable textures and E/site should drop.
+[run.structure]
+enabled = true
+cells = [[12, 12, 1], [24, 24, 1], [36, 36, 1]]
+n_realizations = 4
+fields_T = [0.0, 1.0, 3.0, 5.0]
+initialization = "field_polarized"
+
+# --- 5. commensurability control ------------------------------------------
+# The 120-degree state is a three-sublattice structure, so L divisible by 3
+# accommodates it and other L frustrate it at the boundary. 16x16 is a deliberate
+# control against 12x12 and 24x24; a large shift means the boundary is doing
+# physics it should not.
+[run.commensurability]
+enabled = true
+cells = [[12, 12, 1], [16, 16, 1], [24, 24, 1]]
+n_realizations = 8
+fields_T = [0.5, 1.0, 3.0, 5.0, 7.0]
+initialization = "field_polarized"
+
+# --- parameter overrides ---------------------------------------------------
+# NOTE: must stay at the end of [run] — TOML requires a subtable to follow the
+# parent table's bare keys.
+#
+# The by-eye Sunny-KPM parameter set, matching
+# configs/sunny_largecell_mvh_classical_controls.toml so the diagnostics describe
+# the model actually being used. Comment out to test the canonical best fit.
+[run.param_overrides]
+J1_meV = 0.25
+J2_meV = 0.01
+sigma_J = 0.5
+gzz = 3.8
+sigma_gzz = 0.8
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.largecell]
+include_exchange_disorder = true
+include_gzz_disorder = true

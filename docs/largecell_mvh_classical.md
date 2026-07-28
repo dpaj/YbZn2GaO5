@@ -340,6 +340,143 @@ a quantum depletion of 1.8e-11 uB. Classical over-counting there is 0.116 uB
 (6.11%) at 9 T and 0.059 uB (3.12%) at 14 T. The script now flags any validation
 point whose gap is not comfortably above kT rather than printing a bad number.
 
+## Convergence and protocol diagnostics
+
+```text
+scripts/check_mvh_convergence.jl
+configs/mvh_convergence_controls.toml
+```
+
+Five studies at T = 0, run at the by-eye parameters (`sigma_J = 0.5`,
+`sigma_gzz = 0.8`). 1105 s total. Outputs under
+`results/{feature_tables,figures}/sunny_validation/mvh_convergence/`.
+
+### Realization scatter scales as N^-0.38, not N^-0.50
+
+16 realizations at 12x12, 24x24 and 36x36. The scatter ratio between the smallest
+and largest cell is 2.13-2.42 across six fields where pure self-averaging predicts
+3.00, giving `sigma ~ N^-0.380` (per-field spread 0.345-0.403). Cost measured over
+the same three cells is `time ~ N^1.40`.
+
+Those two exponents settle the "one big cell or many small ones" question
+quantitatively. To halve the error bar:
+
+| route | requirement | cost |
+|---|---|---|
+| grow the cell | N x 6.2 | x 12.9 |
+| more realizations | K = 4 | x 4.0 |
+
+**Realization averaging is 3.2x cheaper per unit accuracy**, before counting that
+independent cells parallelize trivially while one large cell is a single serial
+trajectory. So bound the cell size below by the bias diagnostics, then buy
+accuracy with realizations.
+
+### The realization distribution is not heavy-tailed
+
+Skew is within +-0.9 and excess kurtosis is **negative** everywhere (-0.2 to -1.4),
+i.e. slightly lighter-tailed than Gaussian. The rare-region concern that motivated
+this check does not materialize at these disorder widths, so mean +- sem over a
+modest realization count is a fair summary, and there is no need for quantile
+reporting. Caveat: with 16 realizations the standard error on skew is about 0.6 and
+on excess kurtosis about 1.2, so this is a weak test — it rules out gross
+heavy-tailedness, not mild.
+
+### The protocol is safe
+
+Initialization sensitivity, comparing field-polarized, random, and annealed
+(Langevin cooled from 0.3 meV to kT then relaxed) at fixed realizations:
+M agrees to within **0.0023 uB** at every field and both cell sizes. Annealing
+does find lower energies at most fields, so the landscape does have better minima —
+but they carry essentially the same magnetization. That is the useful result: the
+energy landscape is rugged, yet M(H) is not sensitive to which minimum is found.
+
+### Field history matters only at B = 0
+
+Up-then-down sweeps are hysteretic in the worst-case sense, but the gap is entirely
+a zero-field artifact:
+
+| B (T) | 12x12 | 36x36 |
+|---|---|---|
+| 0.00 | 0.03803 | 0.01291 |
+| 0.50 | 0.00172 | 0.00114 |
+| 2.00 | 0.00374 | 0.00166 |
+| 5.00 | 0.00028 | 0.00055 |
+| 7.00 | 0.00000 | 0.00000 |
+
+Excluding B = 0 the worst gap is **0.0037 uB at 12x12 and 0.0024 uB at 36x36**,
+an order of magnitude below the 0.035 uB model-experiment residual. At exactly zero
+field M vanishes by symmetry, so the gap there only records which frozen texture
+was landed in; it carries no weight in a fit, and the measured curve starts at
+0.022 T regardless.
+
+### There is no medium-range 120-degree order — the box is not the limitation
+
+This is the direct answer to the domain-size question, and the most interesting
+result of the set. The transverse static structure factor on the supercell's own
+allowed q grid gives, at every field and cell size:
+
+| B (T) | cell | S at K | peak fraction | width (rlu) | width x L |
+|---|---|---|---|---|---|
+| 0.0 | 12x12 | 0.141 | 0.157 | 0.367 | 4.40 |
+| 0.0 | 24x24 | 0.045 | 0.052 | 0.351 | 8.42 |
+| 0.0 | 36x36 | 0.019 | 0.023 | 0.368 | 13.23 |
+| 3.0 | 12x12 | 0.146 | 0.146 | 0.358 | 4.30 |
+| 3.0 | 36x36 | 0.011 | 0.019 | 0.365 | 13.13 |
+
+`width_rlu` is **independent of L** at about 0.36 rlu, which is a substantial
+fraction of the Brillouin zone and roughly ten times the 1/L resolution floor.
+`peak_fraction` falls as 1/N, and the peak wanders — it sits at K = (1/3,1/3) in
+only 0 to 2 of 4 realizations, with the mean peak position scattered around
+(0.5-0.7, 0.5-0.7). All three are the signature of a **short-range-correlated,
+essentially frozen transverse texture with a correlation length of order one
+lattice constant**, not of a cell too small to hold a long-range state. Energy per
+site is also flat to 1% across cell sizes (-0.1020, -0.1013, -0.1012 meV at B = 0),
+which is the supporting check: a larger cell gains no room to form a better texture.
+
+So the answer is that the box is comfortably large enough, because there is very
+little texture to contain.
+
+### Commensurability does not matter, which independently confirms the above
+
+16x16 is deliberately incommensurate with the three-sublattice 120-degree order
+(`L % 3 = 1`), against 12x12 and 24x24 which accommodate it. Magnetization agrees
+across all three within the standard error at every field, and energy per site
+agrees to 0.5%. Building a 16x16 cell requires the direct-build path, since a 3x3
+seed cannot tile it — `sv_build_supercell_system` detects this and reports
+`built_directly`.
+
+That null result is exactly what the structure factor predicts: with a correlation
+length of one lattice constant there is no long-range order for the boundary to
+frustrate. Two independent diagnostics agreeing is worth more than either alone.
+
+### Recommended optimizer inner loop
+
+- **Cell:** 12x12x1 is defensible on every bias diagnostic measured (hysteresis
+  0.0037 uB for B > 0, texture resolved, commensurability irrelevant). 24x24x1 if
+  a safety margin is wanted cheaply.
+- **Protocol:** T = 0 `minimize_energy!` from a field-polarized start, adiabatic
+  continuation upward in field. Deterministic given a realization, and
+  initialization independent to 0.0023 uB.
+- **Realizations:** 8-16 with **fixed seeds (common random numbers)** across every
+  parameter evaluation, so realization scatter becomes a fixed function of the
+  parameters rather than noise between evaluations. This is what makes a
+  gradient-free optimizer viable, and it mirrors the CRN discipline the analytical
+  co-fit already uses.
+- **Validation:** re-evaluate the optimum at 36x36x1 with *different* seeds, since
+  a fixed small realization set can be partly fitted.
+- **Threading:** realizations are independent, so `Threads.@threads` over them with
+  `julia -t auto` is the obvious speedup. Not yet implemented.
+
+### What these diagnostics do not cover
+
+- The structure factor was computed only for the field-polarized start. The
+  initialization study compared M, not texture, so it remains possible that
+  annealed states have a different texture at similar M.
+- Hysteresis was measured at 12x12 and 36x36 only, not 24x24.
+- Everything is at the by-eye parameter set. The diagnostics should be re-run if
+  `sigma_J` moves substantially, since the texture conclusion in particular is a
+  statement about that disorder level.
+
 ## Open items
 
 - The measurement temperature is unreconciled: 0.42 K in the control TOMLs,

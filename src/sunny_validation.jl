@@ -873,6 +873,195 @@ function sv_m_parallel_uB_per_site(sys, uhat::SVector{3,Float64})
     return n > 0 ? acc / n : NaN
 end
 
+# -----------------------------------------------------------------------------
+# Shared helpers for supercell magnetization work.
+#
+# These exist so the M(H) workflow, the convergence diagnostics, and any future
+# optimizer all build the same Hamiltonian the same way, rather than each script
+# keeping its own copy.
+# -----------------------------------------------------------------------------
+
+sv_tuple3(v) = (Int(v[1]), Int(v[2]), Int(v[3]))
+
+function sv_repeat_factor(cell_size, seed_dims)
+    cs, sd = sv_tuple3(cell_size), sv_tuple3(seed_dims)
+    rf = ntuple(i -> cs[i] ÷ sd[i], 3)
+    for i in 1:3
+        rf[i] * sd[i] == cs[i] ||
+            error("cell_size $cs is not an integer multiple of seed_dims $sd along axis $i")
+    end
+    return rf
+end
+
+"Does `seed_dims` tile `cell_size` exactly along every axis?"
+function sv_seed_divides_cell(cell_size, seed_dims)
+    cs, sd = sv_tuple3(cell_size), sv_tuple3(seed_dims)
+    return all(i -> sd[i] > 0 && cs[i] % sd[i] == 0, 1:3)
+end
+
+sv_cell_label(cell_size) = join(string.(sv_tuple3(cell_size)), "x")
+
+"""
+    sv_build_supercell_system(params, controls; kwargs...)
+
+Build a disordered inhomogeneous Sunny supercell of size `cell_size`, seeded from
+`seed_dims` and enlarged with `repeat_periodically`. `realization` selects an
+independent disorder draw; `realization = 0` reproduces the original
+single-realization seed bit-for-bit.
+
+If `seed_dims` does not tile `cell_size` exactly, the system is built directly at
+`dims = cell_size` instead. `repeat_periodically` is only a construction
+convenience and the resulting Hamiltonian is the same either way, so this matters
+for cell sizes such as 16x16 that are deliberately incommensurate with a 3x3 seed
+(and hence with the 120-degree three-sublattice order).
+
+Note that bond enumeration order differs between the two construction routes, so
+the RNG stream does too: a seeded build and a direct build at the same
+`realization` index are *different* disorder draws. That is fine for statistical
+comparisons but they must not be compared realization by realization.
+
+Returns `built_directly` so callers can record which route was taken.
+"""
+function sv_build_supercell_system(params, controls::Dict;
+        component::Symbol=:dispersive, cell_size=(36, 36, 1), seed_dims=(3, 3, 1),
+        field_T::Real=0.0, realization::Integer=0,
+        include_exchange::Bool=true, include_gzz::Bool=true)
+    cs = sv_tuple3(cell_size)
+    direct = !sv_seed_divides_cell(cs, seed_dims)
+    sd = direct ? cs : sv_tuple3(seed_dims)
+    rf = direct ? (1, 1, 1) : sv_repeat_factor(cs, sd)
+    base = sv_build_effective_sunny_system(params, controls; component, dims=sd, field_T=field_T)
+    sys = rf == (1, 1, 1) ? to_inhomogeneous(base.sys) :
+                            to_inhomogeneous(repeat_periodically(base.sys, rf))
+    sv_apply_disorder!(sys, params, controls;
+        component, include_exchange, include_gzz, realization)
+    return (; sys, crystal=base.crystal, units=base.units,
+              repeat_factor=rf, seed_dims=sd, built_directly=direct)
+end
+
+"Set a uniform field of `B_T` tesla along `uhat` on an existing system."
+sv_set_field_T!(sys, uhat, units, B_T) =
+    set_field!(sys, collect(uhat .* (Float64(B_T) * units.T)))
+
+"Place every dipole along (the sign of the field times) `uhat`."
+function sv_polarize_along_field!(sys, uhat; field_T::Real=1.0)
+    dip = collect((Float64(field_T) < 0 ? -1.0 : 1.0) .* uhat)
+    for site in eachsite(sys)
+        set_dipole!(sys, dip, site)
+    end
+    return sys
+end
+
+"""
+    sv_m_sat_uB_per_site(sys, uhat, spin_S)
+
+Fully saturated moment along `uhat` for this specific disorder realization,
+`mean_i (uhat . g_i uhat) * S`. Per-site `gzz` is disordered, so this differs
+from the nominal `gzz*S` by O(sigma_gzz/sqrt(N)) and a small cell can legitimately
+exceed the nominal value. Moment deficits must be measured against this.
+"""
+function sv_m_sat_uB_per_site(sys, uhat, spin_S::Real)
+    acc = 0.0
+    n = 0
+    for site in eachsite(sys)
+        acc += dot(uhat, sys.gs[site] * uhat) * Float64(spin_S)
+        n += 1
+    end
+    return n > 0 ? acc / n : NaN
+end
+
+"""
+    sv_transverse_structure_factor(sys, uhat)
+
+Static structure factor of the spin components transverse to `uhat`, evaluated on
+the supercell's own allowed wavevector grid `q = (m1/L1, m2/L2, 0)` (exact for a
+periodic configuration).
+
+This is the direct probe of whether the cell is large enough to contain the
+ground-state texture. For true long-range 120-degree order all weight sits in one
+wavevector, so `peak_fraction -> 1` and `width_rlu -> 0`. For short-range order
+with correlation length xi the weight spreads over `dq ~ 1/xi`.
+
+The decisive test is the L dependence: if `width_rlu` is the same absolute value
+at two cell sizes then xi is resolved and the smaller cell is adequate; if it
+merely tracks `1/L` it is resolution limited and xi exceeds the cell.
+
+Returns `xi_estimate_cells = 1/(2*pi*width_rlu)`, which is approximate — trust
+the L dependence of `width_rlu`, not the absolute xi.
+"""
+function sv_transverse_structure_factor(sys, uhat)
+    L1, L2, L3 = sys.dims
+    L3 == 1 || error("sv_transverse_structure_factor assumes a single layer (dims[3] == 1)")
+    u = SVector{3,Float64}(uhat...)
+
+    # Transverse spin components, indexed by cell.
+    perp = Matrix{SVector{3,Float64}}(undef, L1, L2)
+    for i in 1:L1, j in 1:L2
+        S = SVector{3,Float64}(sys.dipoles[i, j, 1, 1]...)
+        perp[i, j] = S - dot(S, u) * u
+    end
+
+    Sq = zeros(Float64, L1, L2)
+    for m1 in 0:(L1 - 1), m2 in 0:(L2 - 1)
+        acc = zero(SVector{3,ComplexF64})
+        for i in 1:L1, j in 1:L2
+            ph = cis(-2π * (m1 * (i - 1) / L1 + m2 * (j - 1) / L2))
+            acc += ph * perp[i, j]
+        end
+        Sq[m1 + 1, m2 + 1] = sum(abs2, acc) / (L1 * L2)
+    end
+
+    total = sum(Sq)
+    if !(total > 0)
+        return (; peak_q=(NaN, NaN), peak_value=NaN, peak_fraction=NaN,
+                  width_rlu=NaN, xi_estimate_cells=NaN, K_fraction=NaN, total=total)
+    end
+    idx = argmax(Sq)
+    p1, p2 = idx[1] - 1, idx[2] - 1
+
+    # Weight at the allowed wavevector closest to the 120-degree ordering vector
+    # K = (1/3, 1/3). For L divisible by 3 this is exactly on the grid; for other
+    # L it is not, which is itself the commensurability effect under test.
+    k1 = round(Int, L1 / 3) % L1
+    k2 = round(Int, L2 / 3) % L2
+    K_fraction = Sq[k1 + 1, k2 + 1] / total
+
+    # Second-moment width about the peak, using minimum image in the periodic BZ.
+    minimg(d, L) = (r = mod(d, L); r > L / 2 ? r - L : r)
+    var = 0.0
+    for m1 in 0:(L1 - 1), m2 in 0:(L2 - 1)
+        d1 = minimg(m1 - p1, L1) / L1
+        d2 = minimg(m2 - p2, L2) / L2
+        var += Sq[m1 + 1, m2 + 1] * (d1^2 + d2^2)
+    end
+    width = sqrt(var / total)
+
+    return (; peak_q=(p1 / L1, p2 / L2), peak_value=Sq[idx],
+              peak_fraction=Sq[idx] / total, width_rlu=width,
+              xi_estimate_cells=width > 0 ? 1 / (2π * width) : Inf,
+              K_fraction=K_fraction, total=total)
+end
+
+"""
+    sv_anneal_to_ground_state!(sys; kT_high, kT_low, n_stages, n_steps, dt, damping, maxiters)
+
+Simulated-annealing initialization: cool with Langevin from `kT_high` to
+`kT_low`, then relax at T = 0. An alternative to field-polarized or random starts
+for probing whether `minimize_energy!` is trapping in metastable states.
+"""
+function sv_anneal_to_ground_state!(sys; kT_high::Real, kT_low::Real,
+        n_stages::Int=8, n_steps::Int=400, dt::Real=0.02, damping::Real=0.1,
+        maxiters::Int=10_000)
+    for kT in range(Float64(kT_high), Float64(kT_low); length=n_stages)
+        integ = Langevin(Float64(dt); damping=Float64(damping), kT=kT)
+        for _ in 1:n_steps
+            step!(sys, integ)
+        end
+    end
+    minimize_energy!(sys; maxiters)
+    return sys
+end
+
 function sv_sweep_largecell_component(params, controls::Dict; component::Symbol, Bs_T, dims, repeat_factor, include_exchange_disorder::Bool, include_gzz_disorder::Bool, maxiters::Int)
     # Build at zero field, then continue field sweep.
     base = sv_build_effective_sunny_system(params, controls; component, dims, field_T=0.0)
