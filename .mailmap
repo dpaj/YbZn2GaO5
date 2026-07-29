@@ -1,0 +1,21 @@
+# Canonicalize author identities for git log / shortlog / blame.
+#
+# This repo accumulated several author strings before anyone was paying attention:
+# a name-vs-username difference, an email case difference, and — once work started
+# on the shared DGX box — a hostname-derived address that git auto-invented from
+# username@hostname because user.email was unset there.
+#
+# .mailmap fixes how git TOOLING reports these. It does not rewrite history, which
+# is the point: the repo is cloned on two machines that sync only through GitHub,
+# so rewriting published commits is not worth a cosmetic attribution fix.
+#
+# Note GitHub does not honour .mailmap for linking commits to accounts. Commits
+# authored with vdp@neutrons-dgx01.ornl.gov will stay unlinked there; that address
+# is not deliverable and so cannot be verified on the account. The fix for FUTURE
+# commits is to set user.name and user.email on each machine — see CLAUDE.md.
+#
+# Format: Canonical Name <canonical@email> Commit Name <commit@email>
+
+Daniel Pajerowski <daniel@pajerowski.com> dpaj <daniel@pajerowski.com>
+Daniel Pajerowski <daniel@pajerowski.com> Daniel Pajerowski <Daniel@Pajerowski.com>
+Daniel Pajerowski <daniel@pajerowski.com> Daniel Pajerowski (vdp) <vdp@neutrons-dgx01.ornl.gov>

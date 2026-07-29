@@ -124,9 +124,17 @@ end
     c = controls()
     er = SV.sv_energy_resolution_controls(c; section="kpm")
     if er.enabled && er.subtract_kpm_kernel
-        h = SV.sv_resolution_kernel_headroom(er; energies=range(0.5, 3.0; length=26))
-        @test h.ok            # kernel must be valid across the fitting window
+        # Check the FULL configured energy grid, not just the fit window: the target
+        # FWHM is smallest at high energy transfer, so the window alone would miss a
+        # kernel that is too wide at the top of the range.
+        kc = c["kpm"]
+        egrid = range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]);
+                      length=Int(kc["n_energy"]))
+        h = SV.sv_resolution_kernel_headroom(er; energies=egrid)
+        @test h.ok
         @test er.kernel_fwhm <= h.max_valid_kernel_fwhm + 1e-12
+        # And the window on its own must also be satisfied.
+        @test SV.sv_resolution_kernel_headroom(er; energies=range(0.5, 3.0; length=26)).ok
         # And the detector must actually fire on a deliberately too-wide kernel.
         bad = merge(er, (; kernel_fwhm=10.0))
         @test !SV.sv_resolution_kernel_headroom(bad; energies=range(0.5, 3.0; length=26)).ok

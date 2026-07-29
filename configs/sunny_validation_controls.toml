@@ -147,10 +147,12 @@ tol = 0.05
 # [kpm.energy_resolution] FALLS with energy transfer, 0.155 meV at 0.5 meV down to
 # 0.055 meV at 4 meV. A kernel wider than the target cannot be corrected by
 # deposition -- subtract_kpm_kernel has nothing left to remove and the model stays
-# over-broadened. 0.08 was too wide above ~2.7 meV and was being silently clamped;
-# 0.06 is valid across the [0.5, 3.0] meV fitting window at ~1.3x the cost.
+# over-broadened. 0.08 was too wide above ~2.7 meV and was being silently clamped.
+# 0.05 sits below the table minimum of 0.055 meV, so it is valid across the WHOLE
+# 0-4 meV grid rather than only the [0.5, 3.0] meV fit window (which 0.06 covers).
+# Cost scales as 1/fwhm, so this is ~1.2x more than 0.06 and ~1.6x more than 0.08.
 # sv_resolution_kernel_headroom() reports the largest valid value for a given range.
-kernel_fwhm_meV = 0.06
+kernel_fwhm_meV = 0.05
 energy_min_meV = 0.0
 energy_max_meV = 4.0
 n_energy = 161

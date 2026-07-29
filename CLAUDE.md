@@ -198,10 +198,11 @@ Run `julia --project=. test/runtests.jl` before committing; it catches conventio
 regressions. On a machine that has just pulled, also check `julia --version`
 against the manifests' 1.12.3 and run `Pkg.instantiate()` first.
 
-**Do not quote a fixed assertion count.** The suite's total is
-`39 + (number of files in configs/) + (2 if threaded)`, because the config testset
-asserts once per config file and the KPM-threading testset self-skips without
-threads. So it reads 53/55 on a 14-config tree and 54/56 on a 15-config one — all
-correct. Judge it by "all green, 0 failures", not by a number. Runtime is likewise
-machine-dependent (18-21 s on the Windows box, 34 s on the DGX), so it is not a
-regression signal either.
+**Do not quote a fixed assertion count.** The total is not a constant: the config
+testset asserts once per file in `configs/`, and the KPM-threading testset
+self-skips without threads (contributing two assertions with `-t auto`, zero
+without). So the number moves whenever a config is added or an assertion is written,
+and it differs between machines and between threaded and unthreaded runs — observed
+values include 53, 54, 55, 56 and 57, all correct. **Judge it by "all green, 0
+failures".** Runtime is machine-dependent too (about 20 s on the Windows box, 34 s
+on the DGX), so it is not a regression signal either.

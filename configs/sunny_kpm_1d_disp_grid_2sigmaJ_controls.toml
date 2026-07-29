@@ -66,8 +66,9 @@ energy_max_meV = 4.0
 n_energy = 161
 # 0.08 is wider than the CNCS resolution above ~2.7 meV, where the quadrature
 # subtraction in subtract_kpm_kernel has nothing left to remove and the model stays
-# over-broadened. 0.06 is valid across the [0.5, 3.0] meV fit window.
-kernel_fwhm_meV = 0.06
+# over-broadened. 0.05 is below the table minimum (0.055 meV at 4 meV) and so is
+# valid across the whole 0-4 meV grid; it also matches the GPU workflow config.
+kernel_fwhm_meV = 0.05
 tol = 0.05
 maxiters = 50000
 
