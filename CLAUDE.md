@@ -80,10 +80,31 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
   cost goes as N^1.40, so accuracy is bought with realizations, not cell size
   (3.2x cheaper per unit accuracy). The ground-state texture has a correlation
   length of order one lattice constant, so the box is not limiting.
-- **KPM is memory-bandwidth bound.** CPU threading over q saturates at ~3x
-  (verified: not BLAS, not construction overhead). Outer-loop CPU parallelism will
-  not help either. The GPU port is the only effective lever, and multiple GPUs are
-  the way to combine "threading" with GPU.
+- **KPM is memory-bandwidth bound, but the ceiling is MACHINE-SPECIFIC.** On the
+  Windows box CPU q-threading saturates near 3x; on the DGX it reaches 16.6x at 81
+  chunks and is still rising, because a DGX has far more aggregate memory bandwidth.
+  Both machines land at a similar *absolute* throughput (~0.05-0.06 s/q), which is
+  the bandwidth wall; the speedup *factor* differs only because the serial baselines
+  do. An earlier claim here that "the GPU port is the only effective lever" was
+  wrong for the DGX: a single A100 in Float64 (0.065 s/q) actually LOSES to
+  well-threaded DGX CPU (0.0495 s/q). **Multiple GPUs are the real lever** -- 4
+  concurrent A100s give 3.91x aggregate, 97.8% of ideal. Host threading on top of
+  one GPU helps ~1.2x at 36x36x1 but is net contention (0.88x) at 12x12x1, so it is
+  system-size dependent.
+- **Ground-state cost is small; an earlier claim that it was ~76% of runtime was a
+  benchmarking error.** That figure was first-call JIT, not compute. Warm it is
+  0.010 s at 12x12x1 and 0.18 s at 36x36x1 / 14 T (cold/warm ratio 579x at
+  12x12x1), and warm times do scale with system size. There is no Amdahl cap on the
+  GPU gain.
+- **But `maxiters` is badly mis-set for 9 T.** At 9 T on 36x36x1 the energy is
+  converged by ~1000 iterations, yet the minimizer never satisfies its convergence
+  test (gradient plateaus near 8e-8 and is not even monotonic), so it burns the cap.
+  E/site is identical to 8 decimals for maxiters of 1000, 5000, 20000 and 50000,
+  while the time goes 0.89, 4.42, 17.8, 47.1 s. `maxiters = 50000` therefore wastes
+  ~46 of 47 seconds at exactly the field where the neutron data lives. 14 T
+  converges properly in 134 iterations; 9 T is pathological because the disordered
+  system is only partially saturated there. **Judge convergence by E/site, not by
+  the returned flag**, and do not raise `maxiters` to chase the flag.
 - **The M(H) linear term is not Van Vleck.** The crystal field gives
   `chi_VV^zz = 0.0171 +- 0.0007 uB/T`; the fit wants 0.0368, a factor 2.2 more.
 
@@ -106,9 +127,9 @@ so the objective is deterministic in the parameters. Validate any optimum at
   `sv_resolution_kernel_headroom` before a run.
 - `[kpm].tol = 0.05` carries ~10% rms error against tol = 0.005. Acceptable for
   looking at a lineshape, not for fitting; 0.01 costs only 1.7x.
-- The MC Q-sampling mode at `n_events = 5000` costs ~36 min per 6-cut comparison on
-  CPU. The 81-point deterministic grid costs ~35 s. Whether the extra events buy
-  anything has never been tested.
+- The MC Q-sampling mode at `n_events = 5000` is ~36 min per 6-cut comparison on
+  Windows CPU but only ~4 min per cut on one A100, so it is no longer cost-blocked.
+  Whether the extra events buy anything over the 81-point grid is still untested.
 - `results/` is gitignored, so figures do not survive a clone. Regenerate them.
 
 ## Open threads
@@ -161,6 +182,16 @@ Rules that follow from that:
 
 ### Files that need care across machines
 
+- **Set your git identity on every machine**, or git invents one from
+  username@hostname (which is how `vdp@neutrons-dgx01.ornl.gov` reached history):
+
+      git config --global user.name  "Daniel Pajerowski"
+      git config --global user.email "daniel@pajerowski.com"
+
+  That address is what most existing commits use and what links to the `dpaj`
+  GitHub account. `.mailmap` canonicalizes the historical variants for git tooling,
+  but GitHub does not honour `.mailmap` for account linking, so setting this up
+  front is the only real fix.
 - `CLAUDE.md` and `.claude/settings.json` are **shared project config** — push and
   pull them like code. `.claude/settings.local.json` is machine-specific and is
   ignored by this repo's `.gitignore` (deliberately not by a machine-local global
@@ -186,11 +217,28 @@ Rules that follow from that:
 
 ### Which machine for what
 
-KPM is **memory-bandwidth bound**, so CPU threading saturates near 3x and the GPU
-is the only real lever. The Windows box has an RTX A2000 (6 GB, FP64 at 1/32 rate);
-the DGX has A100s (~5-7x the bandwidth, uncrippled FP64, no OOM ceiling, and
-multiple devices for genuine outer-loop parallelism). Heavy KPM belongs on the DGX;
-M(H) work is cheap enough anywhere.
+Windows box: 32 cores, RTX A2000 (6 GB, FP64 at 1/32 rate). CPU q-threading
+saturates near 3x here. DGX: 8x A100-SXM4-40GB, of which **GPUs 4-7 are typically
+held by vLLM** (~0.7 GiB free) and 0-3 are usable; CPU q-threading reaches 16.6x.
+
+Measured on the DGX at 36x36x1, 81 q, tol 0.05, kernel 0.05 meV:
+
+| path | s per q |
+|---|---|
+| CPU serial | 0.774 |
+| CPU, 81 chunks | 0.0495 |
+| GPU Float64 | 0.0653 |
+| GPU Float64, 441-q batch | 0.0488 |
+| GPU Float32 | 0.0532 |
+| 4 GPUs concurrent | 3.91x aggregate |
+
+So one A100 in Float64 roughly ties well-threaded DGX CPU; **the win is running
+several GPUs at once**. Device memory is ~0.85 MiB per q, so the 5000-event MC mode
+needs ~4.8 GiB -- impossible on the 6 GB A2000, trivial on a 40 GB A100 (~45,000 q
+per card). Heavy KPM and the MC Q-sampling mode belong on the DGX; M(H) work is
+cheap enough anywhere. Note the DGX CPU serial figure is not comparable to the
+Windows box 0.216 s/q: it was measured with the kpm-gpu fork of Sunny 0.9.0 and on
+slower per-core hardware.
 
 ## Housekeeping
 

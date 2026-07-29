@@ -322,6 +322,53 @@ Consequences:
   magnitude higher than CPU, which is the likely origin of the 5-8x measured
   elsewhere in this document. For KPM throughput it is the only effective lever.
 
+### CORRECTIONS from DGX measurements (2026-07-29)
+
+Three claims in the section above are wrong or machine-specific. They are left in
+place for provenance; read these first.
+
+**Ground-state cost was a benchmarking error.** The 51-59 s figure was first-call
+JIT, not compute -- the ground state was timed cold while only the KPM path had been
+warmed. Verified independently on the Windows box: 12x12x1 costs 5.79 s cold and
+0.010 s warm, a 579x ratio, and warm times do scale with system size (0.010 / 0.102
+/ 0.180 s for 144 / 576 / 1296 sites). Warm at 36x36x1 and 14 T is 0.18 s, matching
+the DGX 0.20 s. So there is **no Amdahl cap** on the GPU gain, and the Amdahl table
+below is void.
+
+**`maxiters` is mis-set for 9 T, and that is the real ground-state cost.** At 9 T on
+36x36x1 the energy converges by ~1000 iterations but the minimizer never satisfies
+its convergence criterion: the gradient plateaus near 8e-8 and is not monotonic
+(7.88e-8 at 20k iterations, 7.98e-8 at 50k). E/site is identical to 8 decimal places
+for maxiters 1000, 5000, 20000, 50000 while wall time goes 0.89, 4.42, 17.8, 47.1 s.
+So `maxiters = 50000` wastes ~46 of 47 s at one of the two neutron fields. 14 T
+converges in 134 iterations. Judge convergence by E/site, not the returned flag.
+
+**CPU threading does not saturate at 3x everywhere.** That is a property of the
+Windows box, not of KPM. On the DGX it reaches 16.6x at 81 chunks and is still
+rising. Both machines converge to a similar absolute throughput (~0.05-0.06 s/q),
+consistent with a shared memory-bandwidth wall; the speedup factors differ because
+the serial baselines do (0.216 s/q Windows, 0.774 s/q DGX with the kpm-gpu fork on
+slower cores). Consequently the claim that GPU is "the only effective lever" is
+false on the DGX, where one A100 in Float64 (0.0653 s/q) loses to well-threaded CPU
+(0.0495 s/q). Multiple GPUs are the lever: 4 concurrent A100s give 3.91x, 97.8% of
+ideal. Host threading over a single GPU gives ~1.2x at 36x36x1 but costs 0.88x at
+12x12x1, so it is system-size dependent.
+
+**Open accuracy question in the kpm-gpu fork.** On A100, GPU Float64 differs from
+in-process CPU Float64 by relative rms 2.5e-6, where the RTX A2000 gave 6.7e-10.
+Float32 gives 6.1e-6, only 2.4x worse than Float64 where ~100x would be expected.
+CPU is bit-reproducible across processes (9.2e-17) and PEDANTIC_MATH leaves the rms
+bit-identical, so TF32 is excluded. A precision-limiting step shared by both device
+paths is implied. One concrete hypothesis worth testing: the Lanczos spectral bounds
+(`eigbounds`, `niters_bounds`) may differ on device, which would shift the Chebyshev
+rescaling window and hence the derived moment count M -- a different *approximation*
+rather than a rounding difference, which would explain why Float32 and Float64 track
+each other instead of differing by their precision ratio. Print `lo`, `hi` and M on
+both paths to check. For perspective, 2.5e-6 is four orders of magnitude below the
+tol = 0.05 truncation error (~10% rms), so it cannot bias a fit whose residual floor
+is ~1e-2 -- but it should be understood before device Float64 is trusted for
+anything tighter.
+
 ### Projected cost of a full 1D comparison
 
 Six cuts (3 qtags x 2 fields), using the measured 3.04x threaded plateau:
