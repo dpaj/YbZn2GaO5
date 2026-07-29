@@ -1,0 +1,96 @@
+# Controls for scripts/sunny_kpm_gpu_fixed_model_summary.jl
+#
+# This file intentionally only contains diagnostics/workflow choices and overrides.
+# The base science controls still come from configs/sunny_validation_controls.toml
+# and configs/best_fit_parameters.toml.
+
+[workflow]
+# Compare the two neutron incident energies used in the current YZGO 1D scans.
+# For a faster 4.65-meV-only pass, either change this to [4.65] or use the
+# interactive keyword Ei_meV=[4.65].
+Ei_meV = [4.65, 3.32]
+
+# Keep the same field set as the analytical/Sunny validation comparisons.
+fields_T = [9.0, 14.0]
+
+# The 3 usual high-symmetry energy scans. If a cut is missing for a given Ei,
+# the script skips that panel and annotates the figure.
+qtags = ["0_1_0", "0p33_0p33_0", "0p5_0_0"]
+
+# First fixed-model pass: Sunny-style dispersive mode only.
+include_dispersive_component = true
+include_flat_component = false
+
+# Use panel-wise least-squares scaling for line-shape comparison, since the
+# analytical best-fit neutron scale is not expected to transfer quantitatively.
+neutron_scale_mode = "panel_least_squares"  # panel_least_squares, best_fit, none
+
+# Fixed y range for the neutron panels in the combined summary plot.
+# Set to e.g. [-Inf, Inf] only after adding support for that explicitly; for now
+# use finite values or override with the interactive keyword.
+neutron_intensity_ylim = [0.0, 0.003]
+
+# Ground-state preparation for the KPM calculation.
+initial_spin_state = "field_polarized"  # field_polarized or random
+relax_ground_state = true
+
+output_subdir = "sunny_validation/kpm_gpu_fixed_model"
+
+[gpu]
+# These can be overridden by environment variables:
+#   SUNNY_KPM_ENABLE_GPU
+#   SUNNY_KPM_GPU_BACKEND
+#   SUNNY_KPM_GPU_BATCHED
+#   SUNNY_KPM_GPU_PRECISION
+enabled = true
+backend = "CUDA"
+batched = true
+precision = "Float64"
+
+[control_overrides.kpm]
+# Fixed model KPM settings. Start modest; increase the grid once this workflow
+# is stable on A100.
+dims = [3, 3, 1]
+system_size = [36, 36, 1]
+method = "lanczos"
+tol = 0.05
+maxiters = 5000
+
+# Use an energy range that covers the full plotted 4.65 meV scans.
+# Keep the lower bound above zero to avoid the known zero-energy KPM edge issue.
+# A narrower KPM kernel avoids pathological residual-resolution subtraction.
+energy_min_meV = 0.1
+energy_max_meV = 4.2
+n_energy = 241
+kernel_fwhm_meV = 0.05
+
+# Energy-axis resampling mode for mapping native KPM spectra onto the
+# experimental energy-bin centers.
+#
+# "repo_resolved" uses SunnyValidation.sv_model_to_experimental_energy_grid_resolved.
+# "direct_interpolation" bypasses that helper and linearly interpolates the raw
+# q-averaged KPM spectrum onto the experimental energy grid. This is a diagnostic
+# mode for testing whether an apparent energy cutoff is introduced in post-processing.
+energy_resample_mode = "repo_resolved"
+
+# Keep the current experimental histogramming idea: measured cut-volume grid
+# crossed with the momentum-resolution grid. No L integration yet.
+[control_overrides.kpm.experimental_histogram]
+enabled = true
+mode = "analytical_cut_volume_grid"
+measured_grid_mode = "uniform_grid"
+n_measured_h = 5
+n_measured_k = 5
+n_measured_l = 1
+max_q_samples = 1000000
+
+[control_overrides.kpm.q_averaging]
+enabled = true
+mode = "gaussian_grid"
+n_h = 5
+n_k = 5
+n_l = 1
+sigma_H_rlu = 0.035
+sigma_K_rlu = 0.035
+sigma_L_rlu = 0.0
+grid_nsigma = 2.0
