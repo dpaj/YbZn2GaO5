@@ -175,6 +175,38 @@ end
 end
 
 # -----------------------------------------------------------------------------
+@testset "resolution deposition conserves weight at grid edges" begin
+    # The bug: the old implementation renormalized the kernel over the target grid
+    # unconditionally, so a model energy OUTSIDE the target range still deposited its
+    # full intensity, piling onto the edge bins. That produced a spurious spike at the
+    # top of the (0,1,0) cut, which ends at 3.275 meV while the model grid runs to
+    # 4 meV. Interior bins must be unaffected; edge bins must not over-collect.
+    c = controls()
+    er = SV.sv_energy_resolution_controls(c; section="kpm")
+    if er.enabled
+        Em = collect(range(0.0, 4.0; length=161))
+        Et = collect(range(0.025, 3.275; length=66))
+        I = ones(length(Em), 1)
+        out = SV.sv_post_deposit_energy_resolution(Em, I, Et, er)
+        # A flat unit model over a uniform target grid deposits ~1 per model point per
+        # target bin width; with 2 model points per target bin the interior is ~2.
+        interior = 10:56
+        @test all(1.5 .< out[interior, 1] .< 2.5)
+        # The last bin must not be an order of magnitude above the interior.
+        @test out[end, 1] < 2 * maximum(out[interior, 1])
+        # Weight from far outside the range is dropped, not smeared in.
+        lost = SV.sv_deposit_lost_fraction(Em, Et, er)
+        @test lost[findfirst(>=(1.0), Em)] < 1e-6      # deep interior: nothing lost
+        @test lost[findfirst(>=(3.8), Em)] > 0.99      # outside: all lost
+        # Bin edges bracket the centres.
+        edges = SV.sv_bin_edges_from_centers(Et)
+        @test length(edges) == length(Et) + 1
+        @test edges[1] < Et[1] && edges[end] > Et[end]
+        @test issorted(edges)
+    end
+end
+
+# -----------------------------------------------------------------------------
 @testset "crystal field reproduces the published table" begin
     # Zhao et al., Phys. Rev. B 113, 014437 (2026), Tables II-IV. If Sunny's
     # Stevens normalization ever changed, this would catch it.

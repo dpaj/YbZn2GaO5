@@ -6,6 +6,7 @@ using Printf
 using StaticArrays
 using DelimitedFiles
 using Statistics
+import SpecialFunctions
 
 using Sunny
 using CairoMakie
@@ -916,6 +917,10 @@ end
 
 """
     sv_apply_param_overrides(params, run) -> (params, applied)
+
+**Returns a TUPLE**, not just the parameters. `params, applied = sv_apply_...` — this
+signature has caught callers twice, once producing a `FieldError` inside a threaded
+region because `params` was silently a 2-tuple. Destructure at the call site.
 
 Apply `[run.param_overrides]` to a canonical parameter NamedTuple. Returns the
 modified parameters and a sorted list of human-readable "old -> new" strings, so a
@@ -2075,12 +2080,48 @@ function _resolution_headroom_aux(er, energies)
               max_valid_kernel_fwhm=targets[i], n_bad, n_total=length(Es))
 end
 
+"Bin edges implied by a vector of bin centres, outer edges extrapolated by half a bin."
+function sv_bin_edges_from_centers(Et::AbstractVector{<:Real})
+    E = Float64.(Et)
+    n = length(E)
+    n == 1 && return ([E[1] - 0.5, E[1] + 0.5])
+    edges = Vector{Float64}(undef, n + 1)
+    for j in 2:n
+        edges[j] = 0.5 * (E[j-1] + E[j])
+    end
+    edges[1] = E[1] - (edges[2] - E[1])
+    edges[end] = E[end] + (E[end] - edges[end-1])
+    return edges
+end
+
+# Standard normal CDF, via erf from SpecialFunctions (a declared dependency).
+_sv_norm_cdf(z) = 0.5 * (1 + SpecialFunctions.erf(z / sqrt(2)))
+
+"""
+    sv_post_deposit_energy_resolution(E_model, I_E_by_q, E_target, er)
+
+Deposit the native KPM spectrum onto the experimental energy-bin centres with a
+Gaussian resolution kernel, integrating the kernel over each target BIN rather than
+sampling it at bin centres.
+
+Weight is deliberately **not** renormalized over the target grid. The previous
+implementation divided by the discrete sum of kernel weights, which forced every model
+energy to deposit its full intensity onto the target grid *even when that energy lay
+outside the target range* — so all model intensity above the end of a cut piled into
+its last few bins. That produced a spurious spike at the top of the (0,1,0) cut, which
+ends at 3.275 meV while the model grid runs to 4 meV and the 14 T Zeeman mode sits near
+3.1 meV. Intensity at energies a cut does not cover should be dropped, not smeared onto
+the edge.
+
+Using the bin integral rather than point sampling matters because sigma can be far
+smaller than the bin width once the KPM kernel is subtracted in quadrature (down to
+`min_sigma`). Point sampling would then miss the Gaussian almost entirely and, without
+renormalization, lose the intensity; the bin integral puts it in the correct single bin.
+
+Returns the deposited matrix. `sv_deposit_lost_fraction` reports how much weight fell
+outside the target range, which is the diagnostic for edge truncation.
+"""
 function sv_post_deposit_energy_resolution(E_model::AbstractVector{<:Real}, I_E_by_q::AbstractMatrix, E_target::AbstractVector{<:Real}, er)
-    # Deposit the native Sunny/KPM spectrum onto the displayed experimental
-    # energy-bin centers using a Gaussian kernel.  This is closer to the
-    # analytical event-histogrammer than direct interpolation.  The absolute
-    # normalization is not sacred here because the neutron scale is fitted; the
-    # important part is the line shape/width.
     if !er.enabled || er.mode in (:none, :off, :disabled)
         return nothing
     end
@@ -2090,25 +2131,51 @@ function sv_post_deposit_energy_resolution(E_model::AbstractVector{<:Real}, I_E_
     nE, nq = size(I_E_by_q)
     nE == length(Em) || error("Energy axis length mismatch in sv_post_deposit_energy_resolution")
     out = zeros(Float64, length(Et), nq)
+    edges = sv_bin_edges_from_centers(Et)
 
     for (im, Etrue) in enumerate(Em)
         sig = sv_energy_resolution_sigma_meV(Etrue, er)
         if !(isfinite(sig) && sig > 0)
-            # Nearest-bin fallback.
-            j = argmin(abs.(Et .- Etrue))
+            # Genuinely zero width: put it in the bin that contains it, and drop it if
+            # it lies outside the target range.
+            (Etrue >= edges[1] && Etrue <= edges[end]) || continue
+            j = searchsortedlast(edges, Etrue)
+            j = clamp(j, 1, length(Et))
             out[j, :] .+= I_E_by_q[im, :]
             continue
         end
-        w = exp.(-0.5 .* ((Et .- Etrue) ./ sig).^2)
-        sw = sum(w)
-        if isfinite(sw) && sw > 0
-            w ./= sw
-            for j in eachindex(Et)
-                out[j, :] .+= w[j] .* I_E_by_q[im, :]
-            end
+        for j in eachindex(Et)
+            w = _sv_norm_cdf((edges[j+1] - Etrue) / sig) -
+                _sv_norm_cdf((edges[j] - Etrue) / sig)
+            w > 0 || continue
+            out[j, :] .+= w .* I_E_by_q[im, :]
         end
     end
     return out
+end
+
+"""
+    sv_deposit_lost_fraction(E_model, E_target, er)
+
+Fraction of the resolution kernel that falls outside the target energy range, per
+model energy. Large values near the ends of `E_model` are expected and correct — that
+is scattering at energies the cut does not cover — but a large value in the *interior*
+would indicate a target grid too coarse or too short for the kernel.
+"""
+function sv_deposit_lost_fraction(E_model::AbstractVector{<:Real}, E_target::AbstractVector{<:Real}, er)
+    Em = Float64.(E_model)
+    edges = sv_bin_edges_from_centers(Float64.(E_target))
+    lost = similar(Em)
+    for (i, E) in enumerate(Em)
+        sig = sv_energy_resolution_sigma_meV(E, er)
+        if !(isfinite(sig) && sig > 0)
+            lost[i] = (E >= edges[1] && E <= edges[end]) ? 0.0 : 1.0
+        else
+            kept = _sv_norm_cdf((edges[end] - E) / sig) - _sv_norm_cdf((edges[1] - E) / sig)
+            lost[i] = clamp(1 - kept, 0.0, 1.0)
+        end
+    end
+    return lost
 end
 
 function sv_model_to_experimental_energy_grid(
@@ -2889,6 +2956,12 @@ function sv_neutron_curves(params, controls::Dict, cuts::AbstractVector;
     acc = [zeros(Float64, n) for n in nE]
     ctx_info = NamedTuple[]
     failures = NamedTuple[]
+    # Record the regularization actually used for every evaluation. The spectrum
+    # function escalates it on a "Not an energy-minimum" abort, so without this a run
+    # can silently mix values across a parameter sweep -- a reproducibility hazard
+    # raised from the DGX side, since regularization enters the Hamiltonian and the
+    # user never set the escalated value.
+    reg_used = NamedTuple[]
     total_kpm = 0.0
 
     for r in rs
@@ -2920,6 +2993,8 @@ function sv_neutron_curves(params, controls::Dict, cuts::AbstractVector;
                     end
                     sp === nothing && continue
                     total_kpm += sp.seconds
+                    push!(reg_used, (; component=comp, field_T=B, realization=r,
+                        qtag=cut.qtag, regularization=sp.regularization))
                     I = sv_model_to_experimental_energy_grid_resolved(
                         sp.energy_meV, sp.intensity, cut.energy_meV, controls;
                         section, mode=hist_mode)
@@ -2930,10 +3005,14 @@ function sv_neutron_curves(params, controls::Dict, cuts::AbstractVector;
     end
 
     n = max(1, length(rs))
+    regs = unique(r.regularization for r in reg_used)
     return (; curves=[a ./ n for a in acc], cuts, n_realizations=length(rs),
               include_flat, flat_weight=flat_w, contexts=ctx_info,
               failures, n_failed=length(failures),
               all_converged=all(c -> c.converged, ctx_info),
+              regularization_records=reg_used,
+              regularization_values=sort(regs),
+              regularization_escalated=length(regs) > 1,
               kpm_seconds=total_kpm)
 end
 
@@ -3005,12 +3084,18 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
     # otherwise look like a merely bad fit. Return Inf so an optimizer treats the
     # point as infeasible and moves on, and surface the count either way.
     ok = r.n_failed == 0
+    if r.regularization_escalated
+        @warn "Regularization was escalated during this evaluation, so cuts within it were computed at DIFFERENT regularization. Pin [kpm].regularization high enough for the whole parameter range before comparing across parameters." values = r.regularization_values maxlog = 3
+    end
     return (; chi2_red = !ok ? Inf : (ndof > 0 ? chi2 / ndof : NaN),
               rms = !ok ? Inf : (nn > 0 ? sqrt(ss / nn) : NaN),
               chi2_red_raw = ndof > 0 ? chi2 / ndof : NaN,
               scale, per_cut, window=win, n_points=nn, ok,
               n_failed=r.n_failed, failures=r.failures,
               all_converged=r.all_converged,
+              regularization_values=r.regularization_values,
+              regularization_escalated=r.regularization_escalated,
+              regularization_records=r.regularization_records,
               curves=r.curves, n_realizations=r.n_realizations,
               include_flat=r.include_flat, contexts=r.contexts,
               kpm_seconds=r.kpm_seconds)
