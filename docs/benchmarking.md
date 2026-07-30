@@ -369,6 +369,49 @@ tol = 0.05 truncation error (~10% rms), so it cannot bias a fit whose residual f
 is ~1e-2 -- but it should be understood before device Float64 is trusted for
 anything tighter.
 
+#### Resolved: it is the single-q spectral bounds (DGX, 2026-07-30)
+
+The hypothesis above is confirmed, with a sharper mechanism than "the device computes
+slightly different bounds". Both paths call the *same* CPU `Sunny.eigbounds` on the
+host LSWT object (`ext/KAExt/KPM/SpinWaveTheoryKPMBatched.jl:95`), so this is not
+device arithmetic. What differs is the *scheme*:
+
+- **CPU** (`src/KPM/Lanczos.jl:130-138`) recomputes bounds per chain -- per q and per
+  observable -- and fixes M from that chain's own spectral width. Measured at 36x36x1,
+  81 q, tol 0.05, kernel 0.05 meV: `de` falls into two clusters (6.2378-6.2629 and
+  6.8692-6.8742) giving **three distinct moment counts, 324 / 326 / 358**.
+- **Device** computes bounds at ONE representative q (`q_idx = nq / 2`), applies a 4x
+  safety factor to size a shared buffer (`max_iters_global` = 1404 for Float64, 1428
+  for Float32), then terminates each chain *adaptively*: `niters_eff` min 358, median
+  358, max at the cap. So chains the CPU would run at 324/326 get 358, and some run to
+  ~4x the CPU count.
+
+Different M is a different *approximation*, not a rounding difference, and the scheme
+is shared by both device precisions -- which is exactly why Float32 tracks Float64 at
+~2x instead of the ~100x their precision ratio implies.
+
+**The error grows with disorder, as the mechanism predicts.** Single-q bounds get worse
+as the spectral range varies more across q. Relative rms against an in-process CPU
+Float64 reference at 36x36x1, 81 q:
+
+| sigma_J | Float64 | Float32 |
+|---------|---------|---------|
+| 0.2397 (canonical) | 2.61e-06 | 6.55e-06 |
+| 0.5                | 8.88e-06 | 1.82e-05 |
+| 1.0                | 7.25e-05 | 1.25e-04 |
+
+That is a 28x degradation from canonical to sigma_J = 1.0, scaling roughly as
+sigma_J^2.3. **Quote 7e-05, not 2.4e-06, as the figure for the fitting regime** -- the
+canonical number is optimistic by ~28x where we actually fit. It remains ~140x below
+the tol = 0.05 truncation floor, so it is still hygiene rather than a blocker, but the
+margin is much smaller than the canonical number suggests and it would not survive a
+tighter tol.
+
+Secondary finding: `eigbounds` uses a randomized Lanczos start, so the bounds are not
+reproducible call to call -- the device's representative `de` came out 6.7615 in the
+Float64 run and 6.8701 in the Float32 run from the same host object. That puts a floor
+on cross-path reproducibility independent of everything above.
+
 ### Projected cost of a full 1D comparison
 
 Six cuts (3 qtags x 2 fields), using the measured 3.04x threaded plateau:

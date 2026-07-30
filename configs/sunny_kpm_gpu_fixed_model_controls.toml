@@ -54,7 +54,12 @@ dims = [3, 3, 1]
 system_size = [36, 36, 1]
 method = "lanczos"
 tol = 0.05
-maxiters = 5000
+# 1000 is enough: at 9 T with the strong-disorder set the minimizer never satisfies
+# its convergence test (gradient plateaus near 8e-8, non-monotonically) so it burns
+# whatever cap it is given, while E/site is identical to <1e-8 from 250 upward.
+# Measured on the DGX at 36x36x1: 1.81 s at 1000 against 8.41 s at 5000 and 33.7 s
+# at 20000. Judge convergence by E/site, not by the returned flag.
+maxiters = 1000
 # Sunny's 1e-8 default aborts with "Not an energy-minimum" once disorder puts
 # magnon modes near zero energy. 36x36x1 survives 1e-8 by luck; smaller cells and
 # larger sigma_J do not. May need escalating further at sigma_J >~ 0.5, which the
