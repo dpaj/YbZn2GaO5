@@ -357,11 +357,17 @@ function _construct_kpm(sys, controls::Dict)
     measure = SunnyValidation.sv_sunny_measure(sys, controls)
     tol = Float64(kc["tol"])
     method = Symbol(get(kc, "method", "lanczos"))
+    # [kpm].regularization must be forwarded. Sunny defaults to 1e-8, but disorder
+    # puts magnon modes near zero energy, so the BdG matrix loses positive-
+    # definiteness and KPM aborts with "Not an energy-minimum". 36x36x1 survives
+    # 1e-8 by luck; smaller cells and larger sigma_J do not.
+    reg = get(kc, "regularization", nothing)
+    base = reg === nothing ? (;) : (; regularization=Float64(reg))
     try
-        return SpinWaveTheoryKPM(sys; measure=measure, tol=tol, method=method)
+        return SpinWaveTheoryKPM(sys; measure=measure, tol=tol, method=method, base...)
     catch err
         @warn "SpinWaveTheoryKPM(...; method=$method) failed; retrying without method keyword" exception=(err, catch_backtrace())
-        return SpinWaveTheoryKPM(sys; measure=measure, tol=tol)
+        return SpinWaveTheoryKPM(sys; measure=measure, tol=tol, base...)
     end
 end
 

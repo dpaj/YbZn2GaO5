@@ -55,6 +55,11 @@ system_size = [36, 36, 1]
 method = "lanczos"
 tol = 0.05
 maxiters = 5000
+# Sunny's 1e-8 default aborts with "Not an energy-minimum" once disorder puts
+# magnon modes near zero energy. 36x36x1 survives 1e-8 by luck; smaller cells and
+# larger sigma_J do not. May need escalating further at sigma_J >~ 0.5, which the
+# library now does automatically (10x) on that specific error.
+regularization = 1e-6
 
 # Use an energy range that covers the full plotted 4.65 meV scans.
 # Keep the lower bound above zero to avoid the known zero-energy KPM edge issue.

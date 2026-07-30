@@ -1,0 +1,86 @@
+# Controls for scripts/dev/benchmark_kpm_gpu_vs_cpu.jl
+#
+# Diagnostics/workflow choices only. The base science controls come from
+# configs/sunny_validation_controls.toml via [paths].base_controls_toml, and
+# [control_overrides.*] is deep-merged onto it by sv_load_diagnostic_controls.
+#
+# Every environment variable below is an OPTIONAL override of the same key; the
+# config is the primary interface. Override the whole file with the first
+# positional argument or SUNNY_KPM_BENCHMARK_CONTROLS.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+table_subdir = "sunny_validation/kpm_gpu_benchmark"
+
+[run]
+# Which measurements to perform. Each is independent.
+#   ground_state  cold vs warm build/minimize timing, per field
+#   cpu_scan      serial + q-threaded scan, bit-exactness check
+#   gpu           Float64 / Float32 per-q timing, accuracy, device memory
+#   host_chunks   host-side CPU threading layered on top of the GPU
+#   concurrent    one process per GPU, file barrier so KPM phases overlap
+measurements = ["ground_state", "cpu_scan", "gpu", "host_chunks"]
+
+field_T = 14.0
+# Fields used only by the ground_state measurement.
+ground_state_fields_T = [0.5, 4.0, 9.0, 14.0]
+# maxiters values swept by ground_state; E/site is reported for each so that
+# convergence is judged by energy, not by the minimizer's returned flag.
+ground_state_maxiters = [250, 1000, 5000]
+
+# Deterministic q grid: nq_side^2 points spanning +/- grid_nsigma * sigma_rlu
+# about q_center, in rlu. 9 -> 81 q, matching the 1D cut sampler's grid size.
+nq_side = 9
+q_center = [0.5, 0.0, 0.0]
+sigma_rlu = 0.035
+grid_nsigma = 2.0
+
+# Chunk counts for the CPU q-threading scan. 1 must be present: it is the serial
+# baseline every speedup is quoted against. Wall time goes as ceil(nq/nchunks),
+# so counts that do not divide nq are quantised and read as non-monotonic.
+cpu_chunks = [1, 3, 9, 27, 81]
+# Pin BLAS to one thread during the scan so the speedup is q-parallelism only.
+cpu_scan_blas_threads = 1
+
+# Host-thread counts layered over a single GPU. Each needs its own device copy,
+# so device memory grows with this.
+host_chunks = [2, 4, 8]
+
+# Disorder realization. Fixed so timing scatter is not confounded with disorder.
+realization = 0
+
+[gpu]
+precisions = ["Float64", "Float32"]
+backend = "CUDA"
+batched = true
+# Forbid TF32 substitution on Ampere. Verified not to change results, but it
+# removes the question from any accuracy discussion.
+pedantic_math = false
+# Compare device output against a CPU reference computed in the SAME process,
+# which is the only clean control for a GPU-vs-CPU accuracy claim.
+inprocess_cpu_reference = true
+
+[concurrent]
+# Set by the launcher, one process per device.
+barrier_dir = ""
+nproc = 1
+tag = ""
+
+[control_overrides.kpm]
+dims = [3, 3, 1]
+system_size = [36, 36, 1]
+method = "lanczos"
+tol = 0.05
+# Set explicitly rather than inherited, because every timing and accuracy number
+# this script reports depends on it: regularization shifts the low-energy modes,
+# hence the spectral width, hence the derived Chebyshev moment count. 1e-8 (Sunny's
+# default) aborts with "Not an energy-minimum" on smaller cells and larger sigma_J.
+regularization = 1e-6
+# 9 T converges in ~0.17 s on the DGX at any value >= 250 with E/site identical
+# to 10 decimal places; see docs/benchmarking.md.
+maxiters = 2000
+energy_min_meV = 0.1
+energy_max_meV = 4.2
+n_energy = 241
+# Valid over the whole CNCS range, whose resolution bottoms out at 0.055 meV.
+kernel_fwhm_meV = 0.05
