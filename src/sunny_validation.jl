@@ -2733,18 +2733,34 @@ end
 """
     sv_kpm_q_chunks(controls, nq; section="kpm")
 
-How many threaded chunks to split `nq` q points into. Threading is skipped for small
-`nq` because each chunk pays a `SpinWaveTheoryKPM` construction (~0.16 s at
-36x36x1). `[kpm].thread_max_chunks` caps it and `[kpm].thread_min_q` sets the
-threshold; the useful cap is machine-dependent, since CPU q-threading saturates near
-3x on a desktop but reaches 16x on a DGX.
+How many threaded chunks to split `nq` q points into. Defaults to
+`min(nthreads, nq)` — that is, one q per chunk whenever threads allow.
+
+Rationale, measured on the DGX: wall time goes as `ceil(nq / nchunks)`, so the
+optimum is the largest chunk count available and there is no tuned intermediate.
+That also explains why chunk counts of 48 and 64 read as non-monotonic at nq = 81:
+both leave a 2-q remainder, so 48 behaves like 41. The earlier defaults here
+(`thread_min_q_per_chunk = 4`, `thread_min_q = 24`) silently ceilinged nq = 81 at 20
+chunks regardless of `thread_max_chunks`, and forced serial execution below 24 q.
+Those were tuned on a desktop where efficiency collapses past ~8 threads and should
+not have been baked in as universal.
+
+Per-chunk `SpinWaveTheoryKPM` construction (~0.16 s at 36x36x1) is paid in *parallel*,
+so it costs one construction of wall time rather than `nchunks`. The real constraint
+is memory: each chunk holds its own cloned system, so footprint grows linearly in
+`nchunks`. Bounding by `nthreads` bounds concurrency and hence peak memory; lower
+`[kpm].thread_max_chunks` if that is still too much.
+
+Knobs, all optional: `thread_max_chunks` (default `nthreads`), `thread_min_q`
+(default 2, below which threading is pointless), `thread_min_q_per_chunk` (default 1,
+i.e. no artificial ceiling).
 """
 function sv_kpm_q_chunks(controls::Dict, nq::Integer; section::AbstractString="kpm")
     kc = get(controls, section, Dict{String,Any}())
-    min_q = Int(get(kc, "thread_min_q", 24))
+    min_q = Int(get(kc, "thread_min_q", 2))
     (Threads.nthreads() <= 1 || nq < min_q) && return 1
     cap = Int(get(kc, "thread_max_chunks", Threads.nthreads()))
-    min_per = max(1, Int(get(kc, "thread_min_q_per_chunk", 4)))
+    min_per = max(1, Int(get(kc, "thread_min_q_per_chunk", 1)))
     return clamp(min(cap, Threads.nthreads(), nq ÷ min_per), 1, nq)
 end
 
