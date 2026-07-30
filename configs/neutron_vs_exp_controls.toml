@@ -24,8 +24,10 @@ realizations = [0]
 
 # Judged converged by E/site rather than by minimize_energy!'s convergence flag: at
 # 9 T with this disorder the energy is identical to 8 decimals from ~1000 iterations
-# on, while the flag never trips and the cap is simply burned.
-minimize_maxiters = 2000
+# on, while the flag never trips and the cap is simply burned. Confirmed on the DGX at
+# 36x36x1 under strong disorder, where 1000 saves ~6.6 s per field over 2000 at
+# identical E/site, so the extra iterations buy nothing at all.
+minimize_maxiters = 1000
 
 # sigma_J values to overlay. The by-eye value is 0.5.
 sigma_J_overlay = [0.0, 0.5, 1.0]
@@ -61,7 +63,7 @@ seed = 20260611
 system_size = [36, 36, 1]
 dims = [3, 3, 1]
 repeat_factor = [12, 12, 1]
-maxiters = 2000
+maxiters = 1000
 regularization = 1e-5
 # Deterministic cut-volume grid, 3x3x1 measured x 3x3 resolution = 81 q per cut.
 # Whether more q buys anything is exactly what the DGX Q-convergence study is for.
