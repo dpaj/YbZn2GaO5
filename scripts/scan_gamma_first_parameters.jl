@@ -92,6 +92,18 @@ const T0 = time()
 elapsed_h() = (time() - T0) / 3600
 remaining_h() = BUDGET_H - elapsed_h()
 
+# Per-stage deadlines as a fraction of the budget. Without these, a stage-1 grid that
+# runs slower than projected silently consumes the whole night and stage 4 -- the stage
+# that actually protects against the sequential-factorization trap -- never runs at all.
+# Truncating stage 1 costs a few grid points, all of whose rows are already on disk;
+# losing stage 4 costs the only guard against reporting a globally worse optimum.
+const DEADLINES = Dict(
+    "stage1"  => 0.30, "stage1b" => 0.35, "stage2" => 0.65,
+    "stage3"  => 0.72, "stage4"  => 0.95,
+)
+past_deadline(stage) = elapsed_h() > DEADLINES[stage] * BUDGET_H
+deadline_h(stage) = DEADLINES[stage] * BUDGET_H
+
 function banner(s)
     @printf("\n%s\n%s\n%s\n", repeat("=", 78), s, repeat("=", 78))
     flush(stdout)
@@ -186,8 +198,11 @@ best1 = (; chi2=Inf, gzz=params.gzz, sigma_gzz=params.sigma_gzz)
 done = 0
 for gz in GZZ_GRID, sg in SGZZ_GRID
     global best1, done
-    if remaining_h() < 0.15
-        println("  !! wall-clock budget exhausted inside stage 1; stopping the grid.")
+    if past_deadline("stage1")
+        @printf("  !! stage-1 deadline (%.1f h) reached after %d/%d points; truncating so
+",
+                deadline_h("stage1"), done, n1)
+        println("     the later stages still run. Completed rows are already on disk.")
         break
     end
     p = merge(params, (; gzz=gz, sigma_gzz=sg))
@@ -220,8 +235,8 @@ io1b, p1b = open_csv("stage1b_gamma_vs_J1.csv",
     "J1_meV,gzz,sigma_gzz,chi2_red,rms,scale,ok,seconds")
 probe = NamedTuple[]
 for j1 in J1_PROBE
-    if remaining_h() < 0.15
-        println("  !! budget exhausted; stopping stage 1b.")
+    if past_deadline("stage1b")
+        println("  !! stage-1b deadline reached; truncating the J1 probe.")
         break
     end
     p = merge(params, (; gzz=best1.gzz, sigma_gzz=best1.sigma_gzz, J1_meV=j1))
@@ -255,16 +270,18 @@ println("g disorder already accounts for is not re-fit here. A diagonal chi2 val
 println("means sigma_J was standing in for a too-small bandwidth.\n")
 
 best2 = (; chi2=Inf, J1=params.J1_meV, sigma_J=params.sigma_J)
-if remaining_h() < 0.3
-    println("  !! insufficient budget remaining; SKIPPING stage 2.")
+if past_deadline("stage2")
+    println("  !! past the stage-2 deadline already; SKIPPING stage 2.")
 else
     io2, p2 = open_csv("stage2_disp_J1_sigma_J.csv",
         "J1_meV,sigma_J,gzz,sigma_gzz,chi2_red,rms,scale,ok,n_failed,seconds,regularization")
     done2 = 0
     for j1 in J1_GRID, sj in SJ_GRID
         global best2, done2
-        if remaining_h() < 0.15
-            println("  !! budget exhausted inside stage 2; stopping the grid.")
+        if past_deadline("stage2")
+            @printf("  !! stage-2 deadline (%.1f h) reached after %d/%d points; truncating.
+",
+                    deadline_h("stage2"), done2, n2)
             break
         end
         p = merge(params, (; J1_meV=j1, sigma_J=sj,
@@ -292,8 +309,8 @@ banner("Stage 3 -- consistency: re-fit Gamma at the stage-2 J, coarsely")
 println("If (gzz, sigma_gzz) moved, the factorization needs another iteration.\n")
 
 best3 = best1
-if remaining_h() < 0.2
-    println("  !! insufficient budget remaining; SKIPPING stage 3.")
+if past_deadline("stage3")
+    println("  !! past the stage-3 deadline; SKIPPING the Gamma recheck.")
 else
     io3, p3 = open_csv("stage3_gamma_recheck.csv",
         "gzz,sigma_gzz,J1_meV,sigma_J,chi2_red,rms,scale,ok,seconds")
@@ -302,7 +319,7 @@ else
     best3 = (; chi2=Inf, gzz=best1.gzz, sigma_gzz=best1.sigma_gzz)
     for gz in gz_c, sg in unique(sg_c)
         global best3
-        remaining_h() < 0.1 && break
+        past_deadline("stage3") && break
         p = merge(params, (; gzz=gz, sigma_gzz=sg, J1_meV=best2.J1, sigma_J=best2.sigma_J))
         r = evaluate(p, cuts_gamma; label=@sprintf("recheck gzz=%.2f", gz))
         row!(io3, gz, sg, best2.J1, best2.sigma_J, r.chi2, r.rms, r.scale, r.ok,
@@ -350,8 +367,8 @@ const REFINE_STEPS = (
 const N_SWEEPS = Int(get(RUN, "refine_sweeps", 2))
 
 p_refined = p_factorized
-if remaining_h() < 0.4
-    println("  !! insufficient budget remaining; SKIPPING stage 4.")
+if past_deadline("stage4")
+    println("  !! past the stage-4 deadline; SKIPPING the joint refinement.")
 else
     io5, p5 = open_csv("stage4_joint_refinement.csv",
         "sweep,parameter,J1_meV,sigma_J,gzz,sigma_gzz,chi2_red,rms,scale,accepted,seconds")
@@ -365,9 +382,9 @@ else
         global p_refined, cur_chi2
         improved = false
         for (key, deltas, floor_val) in REFINE_STEPS
-            remaining_h() < 0.15 && break
+            past_deadline("stage4") && break
             for d in deltas
-                remaining_h() < 0.15 && break
+                past_deadline("stage4") && break
                 trial = merge(p_refined,
                     NamedTuple{(key,)}((max(floor_val, getfield(p_refined, key) + d),)))
                 getfield(trial, key) == getfield(p_refined, key) && continue
@@ -404,7 +421,7 @@ io4, p4 = open_csv("summary_all_cuts.csv",
 
 totals = Dict{String,Float64}()
 for (name, p) in (("by_eye", params), ("factorized", p_factorized), ("refined", p_final))
-    remaining_h() < 0.1 && (println("  !! budget exhausted; skipping $name."); break)
+    remaining_h() < 0.05 && (println("  !! budget exhausted; skipping $name."); break)
     r = evaluate(p, CUTS_ALL; label=name)
     totals[name] = r.chi2
     @printf("  %-12s J1=%.3f sigma_J=%.2f gzz=%.2f sigma_gzz=%.2f  chi2_red = %.5g\n",
