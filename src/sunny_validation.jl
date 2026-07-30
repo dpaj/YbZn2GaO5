@@ -2633,6 +2633,373 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
     )
 end
 
+# -----------------------------------------------------------------------------
+# Neutron objective.
+#
+# The 1D KPM path above is a forward calculator: it rebuilds and re-minimizes the
+# system for every cut, is serial, uses one disorder realization, and has no
+# residual metric. This section adds what a fit needs, mirroring the structure of
+# sv_mvh_objective:
+#
+#   sv_kpm_context              build + disorder + relax + KPM object ONCE per
+#                               (component, field, realization)
+#   sv_kpm_spectrum_from_context   one cut from a prebuilt context, q-threaded
+#   sv_neutron_curves           all cuts, averaged over realizations
+#   sv_neutron_objective        weighted residual with the intensity scale
+#                               profiled out
+#
+# Two measured facts shape the design. Ground-state relaxation is cheap when warm
+# (0.18 s at 36x36x1) but pathological at 9 T, where the energy converges by ~1000
+# iterations while the convergence flag never trips — so the context reports E/site
+# and the achieved iteration count rather than trusting the flag. And q points are
+# independent, with threaded KPM verified bit-identical to serial, so threading is
+# over q; the useful chunk count is machine-dependent (~8 on a desktop, ~81 on a
+# DGX) and is therefore configurable.
+# -----------------------------------------------------------------------------
+
+"""
+    sv_kpm_context(params, controls; component, field_T, realization, kwargs...)
+
+Build a disordered supercell at `field_T`, relax it, and construct nothing else —
+the `SpinWaveTheoryKPM` object is deliberately *not* cached here, because
+`intensities` mutates its internal buffers and so it cannot be shared across
+threads. Callers build one per thread from `ctx.sys`, which is safe since
+`SpinWaveTheory` clones the system.
+
+Reuse one context across every cut at the same field, which is what makes a fit
+affordable: the relaxation is paid once per (field, realization) instead of once per
+cut.
+
+`initial_spin_state` defaults to `:field_polarized`, which is the protocol the
+neutron diagnostic script settled on; the library's older path used
+`randomize_spins!`, which is a worse starting guess in the field-polarized regime.
+
+**A "Not an energy-minimum" abort from KPM is usually NOT a relaxation failure.**
+Measured at 12x12x1 and 9 T: field-polarized, random, annealed and
+polarized-then-annealed starts all converge and all reach an identical `E/site` to 8
+decimal places, and all four are still rejected by `SpinWaveTheoryKPM` at the same
+wavevector. The cause is `regularization`, not relaxation — see
+`sv_kpm_spectrum_from_context`. `relax_attempts` is available to escalate `maxiters`
+but defaults to 1, because escalation costs time without addressing this failure.
+"""
+function sv_kpm_context(params, controls::Dict; component::Symbol=:dispersive,
+        field_T::Real, realization::Integer=0, section::AbstractString="kpm",
+        initial_spin_state::Symbol=:field_polarized, maxiters::Union{Nothing,Int}=nothing,
+        relax_attempts::Integer=1, maxiters_growth::Integer=4, warn_unconverged::Bool=false)
+    kc = controls[section]
+    sizectl = sv_system_size_controls(controls, section)
+    uhat = sv_field_direction(controls)
+    units = sv_units()
+    iters0 = maxiters === nothing ? Int(kc["maxiters"]) : maxiters
+
+    built = sv_build_supercell_system(params, controls;
+        component, cell_size=sizectl.system_size, seed_dims=sizectl.dims,
+        field_T=field_T, realization=realization,
+        include_exchange=Bool(get(kc, "include_exchange_disorder", true)),
+        include_gzz=Bool(get(kc, "include_gzz_disorder", true)))
+    sys = built.sys
+    sv_set_field_T!(sys, uhat, units, field_T)
+
+    if initial_spin_state === :field_polarized
+        sv_polarize_along_field!(sys, uhat; field_T)
+    elseif initial_spin_state === :random
+        Random.seed!(Int(controls["common"]["seed"]) + 101 + 7919 * Int(realization))
+        randomize_spins!(sys)
+    elseif !(initial_spin_state in (:none, :as_built))
+        error("Unknown initial_spin_state=$initial_spin_state")
+    end
+
+    iters = iters0
+    t = 0.0
+    res = nothing
+    converged = false
+    for attempt in 1:max(1, relax_attempts)
+        t += @elapsed res = minimize_energy!(sys; maxiters=iters)
+        converged = occursin("Converged", string(res))
+        converged && break
+        attempt < relax_attempts && (iters *= maxiters_growth)
+    end
+    E = energy_per_site(sys)
+    if !converged && warn_unconverged
+        @warn "Ground state did not converge after escalating maxiters; SpinWaveTheoryKPM may reject it as not an energy minimum." component field_T realization maxiters_final = iters E_per_site = E maxlog = 5
+    end
+
+    return (; sys, units, crystal=built.crystal, component, field_T=Float64(field_T),
+              realization=Int(realization), repeat_factor=built.repeat_factor,
+              E_per_site=E, minimize_seconds=t, minimize_result=res, converged,
+              cell_size=sizectl.system_size, maxiters=iters, maxiters_initial=iters0)
+end
+
+"""
+    sv_kpm_q_chunks(controls, nq; section="kpm")
+
+How many threaded chunks to split `nq` q points into. Threading is skipped for small
+`nq` because each chunk pays a `SpinWaveTheoryKPM` construction (~0.16 s at
+36x36x1). `[kpm].thread_max_chunks` caps it and `[kpm].thread_min_q` sets the
+threshold; the useful cap is machine-dependent, since CPU q-threading saturates near
+3x on a desktop but reaches 16x on a DGX.
+"""
+function sv_kpm_q_chunks(controls::Dict, nq::Integer; section::AbstractString="kpm")
+    kc = get(controls, section, Dict{String,Any}())
+    min_q = Int(get(kc, "thread_min_q", 24))
+    (Threads.nthreads() <= 1 || nq < min_q) && return 1
+    cap = Int(get(kc, "thread_max_chunks", Threads.nthreads()))
+    min_per = max(1, Int(get(kc, "thread_min_q_per_chunk", 4)))
+    return clamp(min(cap, Threads.nthreads(), nq ÷ min_per), 1, nq)
+end
+
+# Fill `I0` with KPM intensities, serial or threaded over q. Separated out so the
+# regularization-escalation retry has a single thing to call. Threaded results are
+# bit-identical to serial (pinned by test/runtests.jl); each chunk needs its own
+# SpinWaveTheoryKPM because `intensities` mutates its internal buffers, which is safe
+# since SpinWaveTheory clones the system.
+function _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol, reg,
+                                 nchunks, nE, nq)
+    if nchunks <= 1
+        swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=tol,
+                                regularization=reg)
+        res = intensities(swt, qs; energies, kernel)
+        I0 .= sv_orient_sunny_intensity_matrix(sv_try_extract_sunny_intensity(res), nE, nq)
+    else
+        idxs = [c:nchunks:nq for c in 1:nchunks]
+        Threads.@threads for c in eachindex(idxs)
+            qc = qs[idxs[c]]
+            swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=tol,
+                                    regularization=reg)
+            res = intensities(swt, qc; energies, kernel)
+            I0[:, idxs[c]] .= sv_orient_sunny_intensity_matrix(
+                sv_try_extract_sunny_intensity(res), nE, length(qc))
+        end
+    end
+    return I0
+end
+
+"""
+    sv_kpm_spectrum_from_context(ctx, controls, cut; kwargs...)
+
+Intensity on the native KPM energy grid for one experimental cut, using a prebuilt
+context. Threads over q with one `SpinWaveTheoryKPM` per chunk; the threaded result
+is bit-identical to serial (pinned by `test/runtests.jl`).
+
+Returns the q-sample-averaged intensity plus the sampler metadata, matching the
+shape of `sv_kpm_component_spectrum` so existing consumers can be pointed here.
+"""
+function sv_kpm_spectrum_from_context(ctx, controls::Dict, cut::SVNeutronCut1D;
+        section::AbstractString="kpm", threaded::Bool=true,
+        regularization::Union{Nothing,Real}=nothing)
+    kc = controls[section]
+    sys = ctx.sys
+    sampler = sv_kpm_1d_q_sampler(cut, controls)
+    qs = sampler.qs
+    nq = length(qs)
+    energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]);
+                             length=Int(kc["n_energy"])))
+    kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
+    tol = Float64(kc["tol"])
+    # Disorder puts magnon modes at essentially zero energy (measured down to
+    # ~1e-4 meV), so Sunny's default regularization of 1e-8 is too small to keep
+    # the BdG matrix positive definite and KPM aborts with "Not an energy-minimum".
+    # This is NOT a relaxation failure: all four relaxation protocols converge to
+    # an identical E/site and all four are rejected, while raising regularization
+    # to 1e-6 fixes every one of them. See [kpm].regularization.
+    reg = regularization === nothing ? Float64(get(kc, "regularization", 1e-6)) :
+                                       Float64(regularization)
+    nE = length(energies)
+
+    nchunks = threaded ? sv_kpm_q_chunks(controls, nq; section) : 1
+    I0 = Matrix{Float64}(undef, nE, nq)
+
+    # Stronger disorder pushes modes lower, so a fixed regularization eventually
+    # fails again (1e-6 covers sigma_J up to ~0.75 at 12x12x1 but not 1.0). Escalate
+    # on exactly that error rather than pre-emptively using a large value, since
+    # regularization biases low-energy spectral weight.
+    seconds = 0.0
+    attempts = Int(get(kc, "regularization_attempts", 4))
+    growth = Float64(get(kc, "regularization_growth", 10.0))
+    reg_used = reg
+    for attempt in 1:max(1, attempts)
+        try
+            seconds += @elapsed _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol,
+                                    reg_used, nchunks, nE, nq)
+            break
+        catch err
+            msg = sprint(showerror, err)
+            if occursin("energy-minimum", msg) && attempt < attempts
+                reg_used *= growth
+                continue
+            end
+            rethrow()
+        end
+    end
+    reg = reg_used
+
+
+    Ipost, ffw, ffa, qmag = sv_apply_form_factor_to_intensity(I0, qs, controls)
+    Iavg = sv_kpm_1d_average_qsampled_intensity(Ipost, sampler)
+    return (; energy_meV=energies, intensity=Iavg, intensity_qsampled=Ipost,
+              q_average=sampler, q_samples=sampler.n_samples,
+              q_measured_samples=sampler.n_measured,
+              q_resolution_samples=sampler.n_resolution,
+              n_chunks=nchunks, seconds, regularization=reg,
+              form_factor_weight=sum(sampler.weights .* ffw),
+              form_factor_amplitude=sum(sampler.weights .* ffa),
+              qmag_Ainv=sum(sampler.weights .* qmag))
+end
+
+"""
+    sv_neutron_curves(params, controls, cuts; kwargs...)
+
+Model intensity for every cut, on each cut's own experimental energy grid, averaged
+over `realizations`. Contexts are reused across cuts at the same field, so
+relaxation is paid once per (component, field, realization).
+
+`include_flat` adds the zero-exchange component with weight
+`sv_flat_neutron_weight`, matching `sv_run_kpm_1d`. Default is `false`: the M(H) work
+found the minimal single-disordered-phase model sufficient there, and whether the
+spectra still need the phenomenological flat component at high disorder is an open
+question this function exists to help answer.
+"""
+function sv_neutron_curves(params, controls::Dict, cuts::AbstractVector;
+        realizations=0:0, include_flat::Bool=false, section::AbstractString="kpm",
+        threaded::Bool=true, initial_spin_state::Symbol=:field_polarized,
+        maxiters::Union{Nothing,Int}=nothing, verbose::Bool=false,
+        on_failure::Symbol=:record, relax_attempts::Integer=3)
+    hist_mode = Symbol(get(controls[section], "histogram_mode", "bin_average"))
+    flat_w = include_flat ? sv_flat_neutron_weight(params, controls) : 0.0
+    comps = include_flat ? (:dispersive, :flat) : (:dispersive,)
+    rs = collect(realizations)
+
+    nE = [length(c.energy_meV) for c in cuts]
+    acc = [zeros(Float64, n) for n in nE]
+    ctx_info = NamedTuple[]
+    failures = NamedTuple[]
+    total_kpm = 0.0
+
+    for r in rs
+        for comp in comps
+            w = comp === :flat ? flat_w : 1.0
+            for B in unique(Float64[c.field_T for c in cuts])
+                ctx = sv_kpm_context(params, controls; component=comp, field_T=B,
+                    realization=r, section, initial_spin_state, maxiters, relax_attempts)
+                push!(ctx_info, (; component=comp, field_T=B, realization=r,
+                    E_per_site=ctx.E_per_site, minimize_seconds=ctx.minimize_seconds,
+                    converged=ctx.converged, maxiters=ctx.maxiters))
+                verbose && @printf("    ctx %-11s B=%5.2f r=%d  minimize %6.2f s  E/site=%.8f\n",
+                    String(comp), B, r, ctx.minimize_seconds, ctx.E_per_site)
+                for (i, cut) in enumerate(cuts)
+                    cut.field_T ≈ B || continue
+                    # KPM aborts outright if the relaxed state is not a true energy
+                    # minimum at some q. Under an optimizer that must not kill the
+                    # run, so record the failure and let the objective return a
+                    # sentinel the search can simply avoid.
+                    sp = try
+                        sv_kpm_spectrum_from_context(ctx, controls, cut; section, threaded)
+                    catch err
+                        if on_failure === :throw
+                            rethrow()
+                        end
+                        push!(failures, (; component=comp, field_T=B, realization=r,
+                            qtag=cut.qtag, message=first(split(sprint(showerror, err), '\n'))))
+                        nothing
+                    end
+                    sp === nothing && continue
+                    total_kpm += sp.seconds
+                    I = sv_model_to_experimental_energy_grid_resolved(
+                        sp.energy_meV, sp.intensity, cut.energy_meV, controls;
+                        section, mode=hist_mode)
+                    acc[i] .+= w .* Float64.(I)
+                end
+            end
+        end
+    end
+
+    n = max(1, length(rs))
+    return (; curves=[a ./ n for a in acc], cuts, n_realizations=length(rs),
+              include_flat, flat_weight=flat_w, contexts=ctx_info,
+              failures, n_failed=length(failures),
+              all_converged=all(c -> c.converged, ctx_info),
+              kpm_seconds=total_kpm)
+end
+
+"""
+    sv_neutron_weighted_scale(cuts, model; window, use_errors=true)
+
+One global nonnegative intensity scale by weighted least squares, profiling out the
+absolute normalization exactly as `A_M` is profiled out of the M(H) objective. The
+Sunny intensity prefactor is not comparable to the analytical model's, and
+`neutron_global_scale` is itself a fitted quantity, so only the lineshape is a real
+constraint.
+"""
+function sv_neutron_weighted_scale(cuts::AbstractVector, model::AbstractVector;
+        window=(0.5, 3.0), use_errors::Bool=true)
+    num = 0.0
+    den = 0.0
+    for (c, m) in zip(cuts, model)
+        for i in eachindex(c.energy_meV)
+            E = c.energy_meV[i]
+            (window === nothing || (E >= window[1] && E <= window[2])) || continue
+            y, x, e = c.intensity[i], m[i], c.error[i]
+            (isfinite(y) && isfinite(x)) || continue
+            w = use_errors && isfinite(e) && e > 0 ? 1 / e^2 : 1.0
+            num += w * y * x
+            den += w * x^2
+        end
+    end
+    return den > 0 ? max(0.0, num / den) : 0.0
+end
+
+"""
+    sv_neutron_objective(params, controls, cuts; kwargs...)
+
+Residual of the KPM model against the background-subtracted 1D cuts, with one global
+intensity scale profiled out. Returns a weighted reduced chi-squared and an unweighted
+rms, both overall and per cut, plus timing.
+
+The `tol` truncation error sets the floor on what any of this can resolve: at
+`tol = 0.05` the KPM spectrum itself carries ~10% rms error, so residual differences
+far below that are not meaningful.
+"""
+function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
+        window=nothing, use_errors::Bool=true, kwargs...)
+    kc = controls["kpm"]
+    win = window === nothing ?
+        Tuple(Float64.(get(kc, "neutron_scale_fit_window_meV", [0.5, 3.0]))) : window
+    r = sv_neutron_curves(params, controls, cuts; kwargs...)
+    scale = sv_neutron_weighted_scale(cuts, r.curves; window=win, use_errors)
+
+    per_cut = NamedTuple[]
+    chi2 = 0.0; ndof = 0; ss = 0.0; nn = 0
+    for (c, m) in zip(cuts, r.curves)
+        c2 = 0.0; n2 = 0; s2 = 0.0
+        for i in eachindex(c.energy_meV)
+            E = c.energy_meV[i]
+            (E >= win[1] && E <= win[2]) || continue
+            y, x, e = c.intensity[i], scale * m[i], c.error[i]
+            (isfinite(y) && isfinite(x)) || continue
+            d = x - y
+            w = use_errors && isfinite(e) && e > 0 ? 1 / e^2 : 1.0
+            c2 += w * d^2; s2 += d^2; n2 += 1
+        end
+        push!(per_cut, (; field_T=c.field_T, qtag=c.qtag, n=n2,
+            chi2_red=n2 > 0 ? c2 / n2 : NaN, rms=n2 > 0 ? sqrt(s2 / n2) : NaN))
+        chi2 += c2; ss += s2; ndof += n2; nn += n2
+    end
+
+    # A cut whose KPM evaluation failed contributes an all-zero model, which would
+    # otherwise look like a merely bad fit. Return Inf so an optimizer treats the
+    # point as infeasible and moves on, and surface the count either way.
+    ok = r.n_failed == 0
+    return (; chi2_red = !ok ? Inf : (ndof > 0 ? chi2 / ndof : NaN),
+              rms = !ok ? Inf : (nn > 0 ? sqrt(ss / nn) : NaN),
+              chi2_red_raw = ndof > 0 ? chi2 / ndof : NaN,
+              scale, per_cut, window=win, n_points=nn, ok,
+              n_failed=r.n_failed, failures=r.failures,
+              all_converged=r.all_converged,
+              curves=r.curves, n_realizations=r.n_realizations,
+              include_flat=r.include_flat, contexts=r.contexts,
+              kpm_seconds=r.kpm_seconds)
+end
+
 function sv_kpm_neutron_scale_mode(controls::Dict)
     kc = controls["kpm"]
     if haskey(kc, "neutron_scale_mode")

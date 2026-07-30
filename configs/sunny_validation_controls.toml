@@ -142,6 +142,14 @@ include_exchange_disorder = true
 include_gzz_disorder = true
 maxiters = 1000
 tol = 0.05
+# LSWT regularization passed to SpinWaveTheoryKPM. Sunny defaults to 1e-8, which is
+# too small here: disorder puts magnon modes at essentially zero energy (measured
+# down to ~1e-4 meV), the BdG matrix loses positive-definiteness and KPM aborts with
+# "Not an energy-minimum; wavevector q ... unstable". This is not a relaxation
+# failure -- four different relaxation protocols all converge to an identical E/site
+# and all four are rejected, while 1e-6 fixes every one. The 36x36x1 production cell
+# happened to work at 1e-8; smaller cells do not.
+regularization = 1e-6
 # KPM kernel width. Cost scales as 1/fwhm, so this is a speed-versus-correctness
 # knob, but it is bounded from above by the instrument: the CNCS FWHM table in
 # [kpm.energy_resolution] FALLS with energy transfer, 0.155 meV at 0.5 meV down to

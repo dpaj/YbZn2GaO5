@@ -142,6 +142,39 @@ end
 end
 
 # -----------------------------------------------------------------------------
+@testset "KPM regularization for disordered systems" begin
+    # Disorder puts magnon modes near zero energy, so Sunny's default
+    # regularization of 1e-8 loses positive-definiteness and KPM aborts with
+    # "Not an energy-minimum". This is NOT a relaxation failure: the state below
+    # converges and its energy is correct. If someone drops [kpm].regularization
+    # back to the Sunny default, this catches it.
+    c = controls()
+    p = merge(params(), (; J1_meV=0.25, J2_meV=0.01, sigma_J=0.5, gzz=3.8, sigma_gzz=0.8))
+    uhat = SV.sv_field_direction(c)
+    b = SV.sv_build_supercell_system(p, c; cell_size=(12, 12, 1), seed_dims=(3, 3, 1),
+                                     field_T=9.0, realization=0)
+    sys = b.sys
+    SV.sv_set_field_T!(sys, uhat, b.units, 9.0)
+    SV.sv_polarize_along_field!(sys, uhat; field_T=9.0)
+    res = minimize_energy!(sys; maxiters=20_000)
+    @test occursin("Converged", string(res))          # relaxation is not the problem
+
+    E = collect(range(0.0, 4.0; length=21))
+    qs = [[0.44, -0.12, 0.0], [0.5, 0.0, 0.0]]
+    runs(reg) = try
+        swt = SpinWaveTheoryKPM(sys; measure=SV.sv_sunny_measure(sys, c),
+                                tol=0.05, regularization=reg)
+        intensities(swt, qs; energies=E, kernel=gaussian(fwhm=0.05))
+        true
+    catch
+        false
+    end
+    @test !runs(1e-8)                                  # the trap
+    @test runs(1e-6)                                   # the fix
+    @test Float64(get(c["kpm"], "regularization", 1e-8)) >= 1e-6
+end
+
+# -----------------------------------------------------------------------------
 @testset "crystal field reproduces the published table" begin
     # Zhao et al., Phys. Rev. B 113, 014437 (2026), Tables II-IV. If Sunny's
     # Stevens normalization ever changed, this would catch it.
