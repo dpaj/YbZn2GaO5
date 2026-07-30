@@ -1,0 +1,79 @@
+# Overplot the Sunny KPM neutron model against the background-subtracted 1D cuts,
+# and show what the model does as the exchange disorder width is varied.
+#
+# Run with threads (KPM threads over q):
+#   julia -t auto --project=. scripts/plot_neutron_vs_exp.jl
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/neutron_vs_exp"
+table_subdir = "results/feature_tables/sunny_validation/neutron_vs_exp"
+
+[run]
+# Production cell. 36x36x1 is required by q-resolution: the supercell quantizes q to
+# 1/L = 0.028 rlu, against a momentum resolution of sigma_H = 0.037 rlu. A 12x12x1
+# cell gives 0.083 rlu, coarser than the resolution itself, so it is a plumbing test
+# size and not a physics size.
+cell_size = [36, 36, 1]
+seed_dims = [3, 3, 1]
+
+# Single disorder realization. The realization-scatter floor for the neutron
+# objective has NOT been measured yet, so treat curve-to-curve differences below that
+# unknown floor as unresolved. That measurement is queued as Part B of the DGX study.
+realizations = [0]
+
+# Judged converged by E/site rather than by minimize_energy!'s convergence flag: at
+# 9 T with this disorder the energy is identical to 8 decimals from ~1000 iterations
+# on, while the flag never trips and the cap is simply burned.
+minimize_maxiters = 2000
+
+# sigma_J values to overlay. The by-eye value is 0.5.
+sigma_J_overlay = [0.0, 0.5, 1.0]
+# Denser sweep for the sensitivity panel.
+sigma_J_scan = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+# Pin regularization across every evaluation so the sigma_J comparison is
+# apples-to-apples. The library escalates on a "Not an energy-minimum" abort, which
+# would otherwise leave the largest-sigma_J point computed at a different value from
+# the rest -- a confound raised from the DGX side and worth designing out.
+regularization = 1e-5
+
+# Y-axis for the cut panels is set by the inelastic signal above this energy. The
+# elastic line and the model quasi-elastic divergence at large sigma_J are orders of
+# magnitude bigger than the magnon signal and would flatten every panel otherwise.
+elastic_cutoff_meV = 0.35
+
+include_flat = false
+
+[run.param_overrides]
+J1_meV = 0.25
+J2_meV = 0.01
+sigma_J = 0.5
+gzz = 3.8
+sigma_gzz = 0.8
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.kpm]
+system_size = [36, 36, 1]
+dims = [3, 3, 1]
+repeat_factor = [12, 12, 1]
+maxiters = 2000
+regularization = 1e-5
+# Deterministic cut-volume grid, 3x3x1 measured x 3x3 resolution = 81 q per cut.
+# Whether more q buys anything is exactly what the DGX Q-convergence study is for.
+[control_overrides.kpm.experimental_histogram]
+enabled = true
+mode = "analytical_cut_volume_grid"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+
+[control_overrides.kpm.q_averaging]
+enabled = true
+n_h = 3
+n_k = 3
+n_l = 1
