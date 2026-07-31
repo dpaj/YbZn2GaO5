@@ -2365,7 +2365,9 @@ function sv_kpm_1d_q_averaging_controls(controls::Dict)
     sigma_K = Float64(get(qa, "sigma_K_rlu", 0.0))
     sigma_L = Float64(get(qa, "sigma_L_rlu", 0.0))
     grid_nsigma = Float64(get(qa, "grid_nsigma", 1.5))
-    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma)
+    quadrature = Symbol(get(qa, "resolution_quadrature", "gauss_hermite"))
+    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma,
+              quadrature)
 end
 
 function sv_kpm_1d_experimental_histogram_controls(controls::Dict)
@@ -2410,9 +2412,9 @@ function sv_kpm_1d_q_average_offsets(controls::Dict)
             n_h=1, n_k=1, n_l=1, grid_nsigma=ctl.grid_nsigma)
     end
     ctl.mode == :gaussian_grid || error("Unsupported [kpm.q_averaging].mode=$(ctl.mode). Currently use gaussian_grid.")
-    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma)
-    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma)
-    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma)
+    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma; quadrature=ctl.quadrature)
+    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma; quadrature=ctl.quadrature)
+    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma; quadrature=ctl.quadrature)
     offsets = Vector{Vector{Float64}}()
     weights = Float64[]
     for (ih, dh) in enumerate(hs), (ik, dk) in enumerate(ks), (il, dl) in enumerate(ls)
@@ -3556,24 +3558,92 @@ function sv_kpm_2d_q_averaging_controls(k2)
     sigma_K = Float64(get(qa, "sigma_K_rlu", 0.0))
     sigma_L = Float64(get(qa, "sigma_L_rlu", 0.0))
     grid_nsigma = Float64(get(qa, "grid_nsigma", 1.5))
-    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma)
+    quadrature = Symbol(get(qa, "resolution_quadrature", "gauss_hermite"))
+    return (; enabled, mode, n_h, n_k, n_l, sigma_H, sigma_K, sigma_L, grid_nsigma,
+              quadrature)
 end
 
-function sv_gaussian_grid_axis(n::Integer, sigma::Real, grid_nsigma::Real)
+"""
+    sv_gaussian_grid_axis(n, sigma, grid_nsigma; quadrature=:gauss_hermite)
+
+Nodes and weights approximating a Gaussian momentum-resolution average of width `sigma`
+along one axis. Weights are normalised to sum to 1.
+
+**`:gauss_hermite` is the default and is exact. The legacy `:truncated_gaussian_grid` is
+not, and understates the resolution width -- do not use it for physics.**
+
+The legacy rule placed `n` EQUALLY SPACED nodes over `+/- grid_nsigma*sigma`, weighted
+them by the Gaussian and renormalised. Renormalising after truncation fixes the zeroth
+moment but not the second, so the realised width is wrong. At the production setting
+(`n = 3`, `grid_nsigma = 1.5`) the nodes carry weights proportional to
+`{exp(-1.125), 1, exp(-1.125)} = {0.3247, 1, 0.3247}`, i.e. normalised `w_+- = 0.1969`, so
+
+    sigma_eff^2 = 2 * 0.1969 * (1.5*sigma)^2 = 0.886 * sigma^2   ->   sigma_eff = 0.9413*sigma
+
+a **5.9% underestimate of the momentum resolution**. Measured effective widths:
+
+| n | grid_nsigma | sigma_eff/sigma | error |
+|---|---|---|---|
+| 3 | 1.5 | 0.9412 | -5.9% (was production) |
+| 3 | 2.0 | 0.9231 | -7.7% |
+| 3 | 3.0 | 0.4423 | -55.8% |
+| 5 | 1.5 | 0.8552 | -14.5% |
+| 5 | 3.0 | 0.9968 | -0.3% |
+| 9 | 1.5 | 0.8023 | -19.8% |
+
+Note that BOTH obvious repairs make it worse. Widening the window at `n = 3` is
+catastrophic, because three nodes at `+/- 3 sigma` put ~98% of the weight at the centre;
+adding nodes at `grid_nsigma = 1.5` also degrades it, because they crowd into a window
+that is too narrow to begin with. Only `n >= 5` together with `grid_nsigma = 3.0`
+approaches correctness, at 9x the q count for a 3x3 grid.
+
+Gauss-Hermite needs none of that: with the SAME three nodes per axis it is exact, since
+an `n`-node Gaussian quadrature integrates polynomials up to degree `2n-1` exactly and
+therefore reproduces every moment that matters here. Nodes and weights come from
+Golub-Welsch on the probabilists' Hermite recurrence, so any `n` works; `n = 3` gives
+nodes `{0, +/-sqrt(3)*sigma}` with weights `{2/3, 1/6, 1/6}` and
+`sigma_eff^2 = 2*(1/6)*3*sigma^2 = sigma^2`.
+
+`grid_nsigma` is ignored by `:gauss_hermite` -- the node positions are determined by the
+quadrature, not by a truncation window.
+
+Why this matters physically: at `(0,1,0)` the exchange cancels, the mode is flat in q, and
+momentum resolution barely converts into energy width, so `gzz` and `sigma_gzz` are
+relatively protected. At K and M the dispersion is steep, so a momentum resolution that is
+5.9% too narrow makes the model too sharp in energy, and a fit compensates with a larger
+`sigma_J` -- biasing high exactly the parameter the K/M cuts exist to determine.
+"""
+function sv_gaussian_grid_axis(n::Integer, sigma::Real, grid_nsigma::Real;
+        quadrature::Symbol=:gauss_hermite)
     n = Int(n)
     sig = Float64(sigma)
     if n <= 1 || sig <= 0
         return ([0.0], [1.0])
     end
-    xs = collect(range(-Float64(grid_nsigma)*sig, Float64(grid_nsigma)*sig; length=n))
-    ws = exp.(-0.5 .* (xs ./ sig).^2)
-    sw = sum(ws)
-    if !(isfinite(sw) && sw > 0)
-        ws .= 1.0 / length(ws)
+    if quadrature === :gauss_hermite
+        # Golub-Welsch for the probabilists' Hermite weight exp(-x^2/2)/sqrt(2*pi):
+        # symmetric tridiagonal, zero diagonal, off-diagonal beta_k = sqrt(k). The
+        # eigenvalues are the nodes in units of sigma; the squared first components of the
+        # normalised eigenvectors are the weights, and they sum to 1 by construction.
+        J = SymTridiagonal(zeros(n), [sqrt(Float64(k)) for k in 1:(n - 1)])
+        F = eigen(J)
+        xs = sig .* F.values
+        ws = vec(F.vectors[1, :]) .^ 2
+        ws ./= sum(ws)
+        return (collect(xs), collect(ws))
+    elseif quadrature === :truncated_gaussian_grid
+        xs = collect(range(-Float64(grid_nsigma)*sig, Float64(grid_nsigma)*sig; length=n))
+        ws = exp.(-0.5 .* (xs ./ sig).^2)
+        sw = sum(ws)
+        if !(isfinite(sw) && sw > 0)
+            ws .= 1.0 / length(ws)
+        else
+            ws ./= sw
+        end
+        return (xs, collect(ws))
     else
-        ws ./= sw
+        error("Unknown resolution_quadrature=$quadrature; use gauss_hermite or truncated_gaussian_grid")
     end
-    return (xs, collect(ws))
 end
 
 function sv_kpm_2d_q_average_offsets(k2)
@@ -3584,9 +3654,9 @@ function sv_kpm_2d_q_average_offsets(k2)
             n_h=1, n_k=1, n_l=1, grid_nsigma=ctl.grid_nsigma)
     end
     ctl.mode == :gaussian_grid || error("Unsupported [kpm_2d.q_averaging].mode=$(ctl.mode). Currently use gaussian_grid.")
-    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma)
-    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma)
-    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma)
+    hs, wh = sv_gaussian_grid_axis(ctl.n_h, ctl.sigma_H, ctl.grid_nsigma; quadrature=ctl.quadrature)
+    ks, wk = sv_gaussian_grid_axis(ctl.n_k, ctl.sigma_K, ctl.grid_nsigma; quadrature=ctl.quadrature)
+    ls, wl = sv_gaussian_grid_axis(ctl.n_l, ctl.sigma_L, ctl.grid_nsigma; quadrature=ctl.quadrature)
     offsets = Vector{Vector{Float64}}()
     weights = Float64[]
     for (ih, dh) in enumerate(hs), (ik, dk) in enumerate(ks), (il, dl) in enumerate(ls)

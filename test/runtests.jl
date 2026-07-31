@@ -285,4 +285,45 @@ end
     end
 end
 
+@testset "momentum resolution quadrature is exact" begin
+    # The legacy rule placed n equally spaced nodes over +/- grid_nsigma*sigma and
+    # renormalised Gaussian weights. Renormalising after truncation fixes the ZEROTH
+    # moment but not the SECOND, so the realised resolution width was wrong -- 5.9% too
+    # narrow at the production setting (n = 3, grid_nsigma = 1.5). Because momentum
+    # resolution converts into energy width wherever the dispersion is steep, that biases
+    # sigma_J high at K and M, which is precisely where sigma_J is determined.
+    sigeff(xs, ws) = sqrt(sum(ws .* xs .^ 2) / sum(ws))
+
+    # Gauss-Hermite must be exact for every node count, and must ignore grid_nsigma.
+    for n in (2, 3, 5, 7, 9), nsig in (1.5, 3.0)
+        xs, ws = SV.sv_gaussian_grid_axis(n, 2.5, nsig; quadrature=:gauss_hermite)
+        @test isapprox(sum(ws), 1.0; atol=1e-12)
+        @test isapprox(sigeff(xs, ws), 2.5; rtol=1e-10)
+    end
+
+    # n = 3 must be exactly {0, +/-sqrt(3)sigma} with weights {2/3, 1/6, 1/6}.
+    xs, ws = SV.sv_gaussian_grid_axis(3, 1.0, 1.5)
+    @test isapprox(sort(xs), [-sqrt(3), 0.0, sqrt(3)]; rtol=1e-12)
+    @test isapprox(sort(ws), [1/6, 1/6, 2/3]; rtol=1e-12)
+
+    # Pin the legacy rule's error so nobody "fixes" the default back to it. Both obvious
+    # repairs make it worse: widening the window at n = 3 is catastrophic because three
+    # nodes at +/-3 sigma put ~98% of the weight at the centre, and adding nodes at
+    # grid_nsigma = 1.5 crowds them into a window that is already too narrow.
+    for (n, nsig, expected) in ((3, 1.5, 0.941164), (3, 3.0, 0.442285),
+                                (5, 1.5, 0.855154), (9, 1.5, 0.802254))
+        xs, ws = SV.sv_gaussian_grid_axis(n, 1.0, nsig; quadrature=:truncated_gaussian_grid)
+        @test isapprox(sigeff(xs, ws), expected; rtol=1e-4)
+    end
+
+    # The default must be the exact rule, on both the 1D and 2D control paths.
+    c1 = SV.sv_kpm_1d_q_averaging_controls(Dict("kpm" => Dict("q_averaging" => Dict())))
+    @test c1.quadrature === :gauss_hermite
+    c2 = SV.sv_kpm_2d_q_averaging_controls(Dict("q_averaging" => Dict()))
+    @test c2.quadrature === :gauss_hermite
+    @test SV.sv_kpm_1d_q_averaging_controls(Dict("kpm" => Dict("q_averaging" =>
+        Dict("resolution_quadrature" => "truncated_gaussian_grid")))).quadrature ===
+        :truncated_gaussian_grid
+end
+
 end
