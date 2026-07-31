@@ -96,6 +96,41 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
 - **`[largecell]` in the base config is superseded** except for `moment_sign` and
   the `include_*_disorder` flags. Its `4x4x1` drives only the legacy script.
 
+## The data, and how far to trust it
+
+**Read this before interpreting any neutron `chi2` in this repo.** The background under the
+1D cuts is largely *constructed* rather than measured, and it is constructed precisely where
+the interesting signal lives.
+
+`sv_min_over_fields_background_raw` takes the minimum over 0, 9 and 14 T in **two anchor
+windows only** -- `[0, 0.75]` meV and `E > 2.5` meV -- and PCHIP-interpolates everything
+between. The neutron fit window is `[0.5, 3.0]` meV, so **1.75 of its 2.5 meV, roughly 70% of
+the fit window, rests on interpolated background.** There is also a known sharp magnet
+background feature in the Ei = 4.65 meV data which required a bespoke removal scheme, and it
+lives in that same gap.
+
+The three cuts are also **not** corrected identically. Structured-residual windows exist for
+`0p33_0p33_0` (1.675-2.375 meV) and `0p5_0_0` (1.825-2.425 meV), but there is **none for
+`0_1_0`**, whose gap is therefore pure interpolation.
+
+Consequences that should govern priorities here:
+
+- **Sub-percent numerical convergence sits far below the systematic floor.** q-sampling error
+  is under 1%, the realization floor is 12-15%, and the background across most of the fit
+  window is an interpolation. Do not spend compute driving q error below a few tenths of a
+  percent -- it cannot change a conclusion.
+- **The residual that remains at 9 T -- data carrying weight around 1.5-2.4 meV that no
+  parameter set reproduces -- sits dead centre in the unanchored gap**, and leftover magnet
+  background would appear with exactly that sign. It may therefore be an artefact rather than
+  missing physics. **Do not add model complexity (non-Gaussian disorder, XXZ) to chase it**
+  without independent evidence that the feature is real.
+- Higher-order experimental effects -- absorption, sample centring -- can shift the relative
+  scale between one momentum or energy position and another. Cut-to-cut *amplitude* agreement
+  is therefore weaker evidence than *lineshape* agreement.
+- The arbiter is the **Ei = 3.32 meV** data, used as an approximate cross-check where
+  kinematically accessible. Note that `(0,1,0)` is NOT accessible at that Ei, so the one cut
+  with no structured-residual correction is also the one that cannot be cross-checked.
+
 ## Established results — do not re-derive
 
 - **M(H) constrains B_sat, not J1 and gzz separately.** With `A_M` profiled out,
@@ -168,15 +203,28 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
   "did Gamma move?" consistency check reported success. Always finish with a joint step, and
   note that an UNWEIGHTED six-cut sum is dominated by whichever cuts fit worst -- the DGX
   measured the same parameter point scoring ~9 on `(0,1,0)` alone and ~216 on all six.
-- **The model fits the zone centre well and the dispersive cuts badly, and that split is
-  informative.** On `(0,1,0)` the best `chi2_red` is 8.96; at K and M it is 164-285 per cut,
-  i.e. **~25x worse**. Gamma tests only the Zeeman sector (`gzz`, `sigma_gzz`) and the model
-  gets it right; K and M test the exchange Hamiltonian and it does not. On the K/M surface
-  `chi2` rises monotonically with `J1` and falls monotonically with `sigma_J`, with the
-  minimum on BOTH grid edges (`J1` low, `sigma_J` high) -- a fit running away in two
-  directions at once, which is a symptom of model misspecification rather than a parameter
-  waiting to be tuned. Note `sigma_J` lowers `chi2` at *every* `J1` with no crossing, so it
-  is absorbing misfit generally rather than trading off against the bandwidth.
+- **Best known parameter set: `J1 = 0.15`, `sigma_J = 0.50`, `gzz = 3.50`,
+  `sigma_gzz = 0.80`.** `chi2_red = 24.1` across all six cuts against `110.4` for the by-eye
+  set, per-cut 10.6 to 50.5. **Both disorder widths land exactly on the by-eye values** while
+  `J1` falls 40% and `gzz` 8%. So the by-eye disorder was right, and what needed correcting
+  were the two parameters inherited from the analytical model -- which cannot represent mode
+  mixing between exchange environments, whereas Sunny/KPM can. Reached by a coordinate
+  descent that was still improving when stopped, so it is the best KNOWN point, not a
+  converged optimum. One full six-cut evaluation at 81 q with 4 realizations is 456 s.
+- **Away from the zone centre the dispersion runs DOWNWARD from the Zeeman energy**, so
+  lowering `J1` *raises* the K and M peaks toward `gzz*mu_B*B`, while lowering `gzz` lowers
+  everything. At K and 9 T: by-eye 1.98 - 1.13 = 0.86 meV, fitted 1.82 - 0.68 = 1.15 meV,
+  both matching the observed peak positions. That is why the by-eye set could not fit both
+  ends at once -- both parameters were too large, pushing Gamma too HIGH and K/M too LOW
+  simultaneously. An earlier note here read that pattern as "the bandwidth is too small",
+  which was exactly backwards.
+- **RETRACTED: "the exchange sector fails at K and M".** An earlier version of this file
+  recorded `chi2` of 164-285 at K/M and concluded that isotropic Heisenberg cannot describe
+  the dispersive cuts, with XXZ the likely remedy. That was an artefact of a scan grid which
+  fixed `gzz = 3.30` and floored `J1` at 0.20, while the good region is `gzz = 3.50` with
+  `J1 = 0.15` -- outside the grid on both axes. At the right parameters K/M sit at 12-50 and
+  the Gamma-to-K/M gap is 2-3x, not 25x. **Do not revive the XXZ argument from a chi2
+  surface without first checking that the grid contains the optimum.**
 - **The M(H) linear term is not Van Vleck.** The crystal field gives
   `chi_VV^zz = 0.0171 +- 0.0007 uB/T`; the fit wants 0.0368, a factor 2.2 more.
 
@@ -185,7 +233,11 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
 T = 0 `minimize_energy!` from a field-polarized start with adiabatic field
 continuation, 12x12x1, 8-16 **fixed** disorder realizations (common random numbers)
 so the objective is deterministic in the parameters. Validate any optimum at
-36x36x1 with different seeds. Threading is over realizations, so use `julia -t auto`.
+36x36x1 with different seeds. Threading here is over REALIZATIONS rather than over q, so
+the KPM thread-count warning below does not apply directly. But `-t auto` is still the wrong
+choice on a many-core box, because threads beyond the realization count do nothing at all:
+use `julia -t N` with N equal to the number of realizations (8-16). The realization path's
+own scaling knee has not been measured.
 
 ## Gotchas
 
@@ -235,12 +287,20 @@ so the objective is deterministic in the parameters. Validate any optimum at
 
 ## Open threads
 
-1. **Q-convergence for the neutron cuts** — blocks a neutron objective. Does the
-   MC mode buy anything over the 81-point grid?
-2. **A neutron objective** mirroring `sv_mvh_objective`: the neutron side is a
-   mature forward calculator with no residual metric, no realization averaging, no
-   threading, and no optimizer. Ground-state reuse and q-threading live in a
-   diagnostic script and should move into the library.
+1. **SETTLED - q sampling.** Use the deterministic grid at **5x5 measured x 3x3
+   Gauss-Hermite resolution = 225 q**, which converges to 0.058% against a 625-q reference at
+   1.79x the cost of 81 q. 81 q is usable but NOT converged (0.64%) now that the resolution
+   quadrature is correct. Extra *resolution* nodes buy nothing at all -- three Gauss-Hermite
+   nodes are already exact -- so the *measured* axis is the only one that matters. MC sampling
+   is not preferred: at 625 events it still carries ~0.5% sampling error, and while its
+   samples are frozen across evaluations (hence deterministic), they are irregular in
+   parameter space. All of this sits far below the systematic floor described above.
+2. **MOSTLY DONE - the neutron objective.** `sv_neutron_objective` exists, with realization
+   averaging under common random numbers, q-threading, a profiled-out intensity scale,
+   failure sentinels and per-cut reporting. What is still missing is an OPTIMIZER: the scans
+   use grid search plus coordinate descent driven from a script. Also outstanding is the
+   realization scatter expressed in `chi2_red` units rather than spectrum units, which is the
+   number a fit actually consumes.
 3. **Co-optimization** of the spectra and M(H), which is the point of all of the
    above: M(H) pins B_sat and sigma_gzz, the spectra must pin sigma_J.
 4. Does the neutron model still need the phenomenological flat component (r2)
