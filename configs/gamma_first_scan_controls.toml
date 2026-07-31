@@ -106,6 +106,18 @@ stage3_sigma_gzz_deltas = [-0.2, 0.0, 0.2]
 # at every q and Gamma alone cannot see the cost it imposes at K and M.
 refine_sweeps = 2
 
+# RUN 3: stage 1 is settled by run 1's complete 6x6 surface, so carry its answer in and
+# spend the box on the OPEN question -- the J1 x sigma_J valley at K and M. Stage 3's
+# recheck deltas (-0.15, 0, +0.15) probe gzz = 3.15 and 3.45, so the below-3.30 question
+# run 2 was going to answer is still covered, at the stage-2 J rather than the by-eye one.
+skip_stage1 = true
+gzz_fixed = 3.30
+sigma_gzz_fixed = 0.80
+
+# The escalation ladder chases a convergence flag that never trips at 9 T. Verified on
+# both machines: 21.8x the relax cost for 5.8e-9 in E/site, and <=0.12% in the spectrum.
+relax_attempts = 1
+
 include_flat = false
 
 # Starting point: the by-eye neutron parameters, which the summary stage also re-runs

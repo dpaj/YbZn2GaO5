@@ -77,6 +77,12 @@ const NREAL = Int(get(RUN, "n_realizations", 8))
 const REALS = 0:(NREAL - 1)
 const MAXITERS = Int(get(RUN, "minimize_maxiters", 1000))
 const BUDGET_H = Float64(get(RUN, "wall_clock_budget_hours", 11.0))
+# 1, not 3: the escalation loop chases minimize_energy!'s convergence flag, which never
+# trips at 9 T under this disorder, and buys 5.8e-9 in E/site for 21.8x the relax cost.
+const RELAX_ATTEMPTS = Int(get(RUN, "relax_attempts", 1))
+# Stage 1 answers can be carried in from a previous run rather than recomputed, which is
+# the difference between re-deriving a known surface and getting to the open question.
+const SKIP_STAGE1 = Bool(get(RUN, "skip_stage1", false))
 const OUTDIR = SV.sv_repo_path(REPO_ROOT, get(controls["paths"], "table_subdir",
     "results/feature_tables/sunny_validation/gamma_first_scan"))
 mkpath(OUTDIR)
@@ -133,7 +139,8 @@ function evaluate(p, cuts; label="")
     t = time()
     try
         o = SV.sv_neutron_objective(p, controls, cuts;
-            realizations=REALS, threaded=true, maxiters=MAXITERS, on_failure=:record)
+            realizations=REALS, threaded=true, maxiters=MAXITERS, on_failure=:record,
+            relax_attempts=RELAX_ATTEMPTS)
         wall = time() - t
         work = o.kpm_seconds + sum(c.minimize_seconds for c in o.contexts; init=0.0)
         WORK_SECONDS[] += work
@@ -221,6 +228,15 @@ flush(stdout)
 
 # ---------------------------------------------------------------- stage 1
 
+best1 = (; chi2=NaN, gzz=Float64(get(RUN, "gzz_fixed", params.gzz)),
+           sigma_gzz=Float64(get(RUN, "sigma_gzz_fixed", params.sigma_gzz)))
+if SKIP_STAGE1
+    banner("Stages 1 and 1b -- SKIPPED, carried in from a previous run")
+    @printf("  gzz = %.2f, sigma_gzz = %.2f taken from [run].gzz_fixed / .sigma_gzz_fixed
+",
+            best1.gzz, best1.sigma_gzz)
+    println("  Set skip_stage1 = false to re-derive them.")
+else
 banner("Stage 1 -- (0,1,0) only: gzz from peak POSITION, sigma_gzz from WIDTH")
 println("At q = 0 the exchange cancels, so this subset should be insensitive to J1.")
 println("The fitted intensity scale is free here, which is what removes amplitude from")
@@ -300,6 +316,8 @@ end
 println("  -> $p1b")
 
 # ---------------------------------------------------------------- stage 2
+
+end  # SKIP_STAGE1
 
 banner("Stage 2 -- K and M only: J1 from BANDWIDTH, sigma_J from EXCESS width")
 println("gzz and sigma_gzz are now FIXED at the stage-1 values, so the broadening that")

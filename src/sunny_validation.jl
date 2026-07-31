@@ -2942,11 +2942,31 @@ found the minimal single-disordered-phase model sufficient there, and whether th
 spectra still need the phenomenological flat component at high disorder is an open
 question this function exists to help answer.
 """
+# NOTE on relax_attempts: the default is 1, NOT 3.
+#
+# The escalation loop in sv_kpm_context breaks on minimize_energy!'s convergence FLAG
+# (occursin("Converged", ...)), not on a KPM rejection. At 9 T under this disorder the
+# flag never trips -- the gradient plateaus and is not even monotonic -- so
+# relax_attempts > 1 escalates maxiters unconditionally, 1000 -> 4000 -> 16000, purely
+# chasing a flag the documented protocol says to ignore. It is not a KPM safety net.
+#
+# Measured at 36x36x1, gzz = 3.35, sigma_gzz = 0.8, sigma_J = 0.5, 9 T:
+#   relax_attempts = 3 -> 19.17 s, maxiters_final 16000, E/site -0.6832782579
+#   relax_attempts = 1 ->  0.88 s, maxiters_final  1000, E/site -0.6832782521
+# 21.8x the relaxation cost for a 5.8e-9 change in E/site, KPM time unchanged. The DGX
+# independently confirmed it at the SPECTRUM level: maxiters 1000 vs 16000 changes the
+# shape by at most 0.12% relrms over [0.5, 3.0] meV, ~100x below both the realization
+# floor (12-15%) and the tol = 0.05 truncation error (~10%).
+#
+# The old default of 3 therefore did exactly what CLAUDE.md warns against -- "judge
+# convergence by E/site, not by the returned flag, and do not raise maxiters to chase the
+# flag" -- at ~1.55x the cost of every neutron evaluation. Raise it only if KPM actually
+# starts rejecting states, which is a regularization problem, not a maxiters problem.
 function sv_neutron_curves(params, controls::Dict, cuts::AbstractVector;
         realizations=0:0, include_flat::Bool=false, section::AbstractString="kpm",
         threaded::Bool=true, initial_spin_state::Symbol=:field_polarized,
         maxiters::Union{Nothing,Int}=nothing, verbose::Bool=false,
-        on_failure::Symbol=:record, relax_attempts::Integer=3)
+        on_failure::Symbol=:record, relax_attempts::Integer=1)
     hist_mode = Symbol(get(controls[section], "histogram_mode", "bin_average"))
     flat_w = include_flat ? sv_flat_neutron_weight(params, controls) : 0.0
     comps = include_flat ? (:dispersive, :flat) : (:dispersive,)
