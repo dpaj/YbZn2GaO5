@@ -89,7 +89,23 @@ const SJ_GRID = grid("sigma_J_grid", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
 const J1_PROBE = grid("J1_probe_grid", [0.15, 0.20, 0.25, 0.30, 0.35, 0.40])
 
 const T0 = time()
-elapsed_h() = (time() - T0) / 3600
+wall_h() = (time() - T0) / 3600
+
+# Budget accounting runs on measured COMPUTE time, not wall clock.
+#
+# The first overnight attempt was destroyed by this: Windows Modern Standby suspended
+# the process 1.9 h in (it keys off USER-INPUT idle, not CPU load, so a fully loaded
+# 32-thread job does nothing to prevent it). One evaluation therefore reported 37,180 s
+# of wall clock for 235 s of work -- bit-identical chi2, 158x the elapsed time -- which
+# consumed the entire remaining budget and skipped stages 2, 3 and 4. Every later stage
+# saw "past deadline" and gave up.
+#
+# Summing kpm_seconds and minimize_seconds instead makes the budget blind to suspension:
+# time the process was not running simply does not count. Sleep should also be disabled
+# for an overnight run (powercfg /change standby-timeout-ac 0), but the accounting must
+# not DEPEND on that having been done.
+const WORK_SECONDS = Ref(0.0)
+elapsed_h() = WORK_SECONDS[] / 3600
 remaining_h() = BUDGET_H - elapsed_h()
 
 # Per-stage deadlines as a fraction of the budget. Without these, a stage-1 grid that
@@ -118,16 +134,33 @@ function evaluate(p, cuts; label="")
     try
         o = SV.sv_neutron_objective(p, controls, cuts;
             realizations=REALS, threaded=true, maxiters=MAXITERS, on_failure=:record)
+        wall = time() - t
+        work = o.kpm_seconds + sum(c.minimize_seconds for c in o.contexts; init=0.0)
+        WORK_SECONDS[] += work
+        # A large wall/work gap means the process was not running -- suspension, swapping
+        # or contention. Say so, because otherwise it looks like a pathological parameter
+        # point and invites the wrong diagnosis. It cost a full night once already.
+        if wall > 3 * work + 60
+            @printf("    ** wall %.0f s but only %.0f s of compute: the process was NOT
+", wall, work)
+            @printf("       RUNNING for ~%.0f s. Suspected sleep/standby or contention, not a
+", wall - work)
+            @printf("       slow parameter point. Budget counts compute only, so this is not fatal.
+")
+            flush(stdout)
+        end
         return (; ok=o.ok, chi2=o.chi2_red, rms=o.rms, scale=o.scale,
-                  n_failed=o.n_failed, seconds=time() - t,
+                  n_failed=o.n_failed, seconds=wall, work_seconds=work,
                   reg=isempty(o.regularization_values) ? NaN : maximum(o.regularization_values),
                   per_cut=o.per_cut)
     catch err
         msg = first(split(sprint(showerror, err), '\n'))
         @printf("    !! %s failed: %s\n", label, msg[1:min(70, end)])
         flush(stdout)
+        wall = time() - t
+        WORK_SECONDS[] += wall     # unknown split on a failure; charge it all
         return (; ok=false, chi2=Inf, rms=Inf, scale=NaN, n_failed=-1,
-                  seconds=time() - t, reg=NaN, per_cut=NamedTuple[])
+                  seconds=wall, work_seconds=wall, reg=NaN, per_cut=NamedTuple[])
     end
 end
 
@@ -174,7 +207,8 @@ cal_d = evaluate(params, cuts_disp; label="calib-disp")
 n1 = length(GZZ_GRID) * length(SGZZ_GRID)
 n1b = length(J1_PROBE)
 n2 = length(J1_GRID) * length(SJ_GRID)
-n3 = 25
+n3 = length(get(RUN, "stage3_gzz_deltas", [0,0,0])) *
+     length(get(RUN, "stage3_sigma_gzz_deltas", [0,0,0]))
 n4 = 1 + 8 * Int(get(RUN, "refine_sweeps", 2))       # start + 4 params x 2 signs x sweeps
 cal_all = cal_g.seconds + cal_d.seconds              # all six cuts, less ground-state reuse
 proj = (n1 * cal_g.seconds + n1b * cal_g.seconds + n2 * cal_d.seconds +
@@ -193,7 +227,8 @@ println("The fitted intensity scale is free here, which is what removes amplitud
 println("the position/width determination -- position and width are scale-invariant.\n")
 
 io1, p1 = open_csv("stage1_gamma_gzz_sigma_gzz.csv",
-    "gzz,sigma_gzz,chi2_red,rms,scale,ok,n_failed,seconds,regularization")
+    "gzz,sigma_gzz,chi2_red,rms,scale,ok,n_failed,seconds,work_seconds,regularization," *
+    join(["chi2_$(c.qtag)_$(Int(c.field_T))T" for c in cuts_gamma], ","))
 best1 = (; chi2=Inf, gzz=params.gzz, sigma_gzz=params.sigma_gzz)
 done = 0
 for gz in GZZ_GRID, sg in SGZZ_GRID
@@ -208,7 +243,9 @@ for gz in GZZ_GRID, sg in SGZZ_GRID
     p = merge(params, (; gzz=gz, sigma_gzz=sg))
     r = evaluate(p, cuts_gamma; label=@sprintf("gzz=%.2f sgzz=%.2f", gz, sg))
     row!(io1, gz, sg, r.chi2, r.rms, r.scale, r.ok, r.n_failed,
-         round(r.seconds; digits=2), r.reg)
+         round(r.seconds; digits=2), round(r.work_seconds; digits=2), r.reg,
+         (isempty(r.per_cut) ? fill(NaN, length(cuts_gamma)) :
+          [pc.chi2_red for pc in r.per_cut])...)
     if r.ok && r.chi2 < best1.chi2
         best1 = (; chi2=r.chi2, gzz=gz, sigma_gzz=sg)
     end
@@ -274,7 +311,9 @@ if past_deadline("stage2")
     println("  !! past the stage-2 deadline already; SKIPPING stage 2.")
 else
     io2, p2 = open_csv("stage2_disp_J1_sigma_J.csv",
-        "J1_meV,sigma_J,gzz,sigma_gzz,chi2_red,rms,scale,ok,n_failed,seconds,regularization")
+        "J1_meV,sigma_J,gzz,sigma_gzz,chi2_red,rms,scale,ok,n_failed,seconds," *
+        "work_seconds,regularization," *
+        join(["chi2_$(c.qtag)_$(Int(c.field_T))T" for c in cuts_disp], ","))
     done2 = 0
     for j1 in J1_GRID, sj in SJ_GRID
         global best2, done2
@@ -288,7 +327,9 @@ else
                              gzz=best1.gzz, sigma_gzz=best1.sigma_gzz))
         r = evaluate(p, cuts_disp; label=@sprintf("J1=%.3f sJ=%.2f", j1, sj))
         row!(io2, j1, sj, best1.gzz, best1.sigma_gzz, r.chi2, r.rms, r.scale, r.ok,
-             r.n_failed, round(r.seconds; digits=2), r.reg)
+             r.n_failed, round(r.seconds; digits=2), round(r.work_seconds; digits=2), r.reg,
+             (isempty(r.per_cut) ? fill(NaN, length(cuts_disp)) :
+              [pc.chi2_red for pc in r.per_cut])...)
         if r.ok && r.chi2 < best2.chi2
             best2 = (; chi2=r.chi2, J1=j1, sigma_J=sj)
         end
@@ -314,8 +355,10 @@ if past_deadline("stage3")
 else
     io3, p3 = open_csv("stage3_gamma_recheck.csv",
         "gzz,sigma_gzz,J1_meV,sigma_J,chi2_red,rms,scale,ok,seconds")
-    gz_c = [best1.gzz + d for d in (-0.2, -0.1, 0.0, 0.1, 0.2)]
-    sg_c = [max(0.0, best1.sigma_gzz + d) for d in (-0.3, -0.15, 0.0, 0.15, 0.3)]
+    gz_d = Float64.(get(RUN, "stage3_gzz_deltas", [-0.15, 0.0, 0.15]))
+    sg_d = Float64.(get(RUN, "stage3_sigma_gzz_deltas", [-0.2, 0.0, 0.2]))
+    gz_c = [best1.gzz + d for d in gz_d]
+    sg_c = [max(0.0, best1.sigma_gzz + d) for d in sg_d]
     best3 = (; chi2=Inf, gzz=best1.gzz, sigma_gzz=best1.sigma_gzz)
     for gz in gz_c, sg in unique(sg_c)
         global best3
