@@ -105,6 +105,36 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
   converges properly in 134 iterations; 9 T is pathological because the disordered
   system is only partially saturated there. **Judge convergence by E/site, not by
   the returned flag**, and do not raise `maxiters` to chase the flag.
+- **`sigma_gzz`, not `sigma_J`, dominates both KPM cost and realization scatter.**
+  Confirmed from two orthogonal scans on two machines: at fixed `sigma_J = 0.5`, cost rises
+  **2.82x** across `sigma_gzz` 0 -> 1.0 (Windows); at fixed `sigma_gzz = 0.8`, it rises only
+  **1.12x** across `sigma_J` 0 -> 1.0 (DGX). The realization floor behaves the same way --
+  12.4% shape spread rms at `sigma_J = 0`, rising only ~19% by `sigma_J = 1.0`. The reason is
+  a scale comparison: the Zeeman term is 1.7 meV at 9 T and 3.1 meV at 14 T and `sigma_gzz =
+  0.8` spreads it by +-0.65 meV at 14 T, whereas the whole exchange bandwidth
+  `S*[J(0)-J(q)]` is only ~0.5-1 meV at `J1 = 0.25`, `S = 1/2`. Both of us initially
+  predicted 2-3x from `sigma_J`; the magnitude was right and the cause wrong.
+  This is physics, not just performance: the g-factor distribution is the dominant disorder
+  effect in the spectra, which is the mechanism Zhao et al. anticipated.
+- **The neutron realization floor is 12-15%** (shape spread rms, per-cut range 0.080-0.191,
+  6 realizations at 36x36x1). It is measured in SPECTRUM units, which is the wrong unit for a
+  fit -- the number a fit consumes is the scatter in `chi2_red`, and that is still pending.
+  Practical consequence already observed: at 4 realizations the Gamma surface separates
+  `chi2_red` 9.4 from 50 trivially but does NOT resolve 9.42 from 9.60.
+- **The Gamma cut alone prefers `gzz` = 3.30-3.45 with `sigma_gzz` = 0.80.** Complete 6x6
+  surface on `(0,1,0)` at 9 and 14 T, where the exchange cancels identically so J does not
+  enter to leading order. The by-eye `gzz = 3.8` scores 21.87 against 9.42, i.e. **2.3x
+  worse**, and the published 3.44 sits in the minimum. `sigma_gzz = 0.8` is a genuine
+  interior minimum, so the by-eye `sigma_gzz` was right and it is `gzz` that was wrong.
+  Caveat: a mean `gzz` of 3.3 with `sigma_gzz = 0.8` is a 24% spread, so the convolved
+  lineshape peak is NOT at `gzz*mu_B*B` -- do not compare the fitted mean directly against a
+  peak-position estimate.
+- **A staged factorization can be globally worse than its own starting point.** `gzz` shifts
+  the mode energy at every q, so a `gzz` chosen from Gamma alone cannot see the cost it
+  imposes at K and M; a 12x12x1 test landed 73% worse on the six-cut `chi2` while the
+  "did Gamma move?" consistency check reported success. Always finish with a joint step, and
+  note that an UNWEIGHTED six-cut sum is dominated by whichever cuts fit worst -- the DGX
+  measured the same parameter point scoring ~9 on `(0,1,0)` alone and ~216 on all six.
 - **The M(H) linear term is not Van Vleck.** The crystal field gives
   `chi_VV^zz = 0.0171 +- 0.0007 uB/T`; the fit wants 0.0368, a factor 2.2 more.
 
@@ -117,7 +147,36 @@ so the objective is deterministic in the parameters. Validate any optimum at
 
 ## Gotchas
 
-- Run anything with KPM or realization averaging under **`julia -t auto`**.
+- **Do NOT run KPM under `julia -t auto` on a many-core box.** Intra-process q-threading
+  loses efficiency fast, and past a knee it goes *negative*. Measured intra-process
+  efficiency (one 81-q spectrum, 36x36x1):
+
+  | chunks/threads | 1 | 2 | 4 | 8 | 16 | 32 | 128 |
+  |---|---|---|---|---|---|---|---|
+  | Windows, 32 cores | 100% | 92% | 73% | 36% | 22% | 10% | - |
+  | DGX, 2x EPYC 7742 | - | - | ~100% | 90% | 73% | - | **5%** |
+
+  On the DGX, **one process with 128 threads is the worst configuration measured** -- 21.96 s
+  per spectrum against 11.25 s for the *same code* on 16 threads. The fix is to fan out over
+  **processes**, threading only as far as it stays efficient: 32 processes x 4 threads gives
+  0.859 spec/s against 0.046 for `-t auto`, an **18.7x** difference. On the Windows box the
+  equivalent is ~8 processes x 4 threads, worth ~7x over the 3.4x that 32 threads saturates at.
+  The ceiling is process-internal (synchronisation or per-chunk overhead in the q-loop), NOT
+  memory bandwidth: per-process throughput stays flat as processes are added, 8x16 and 16x8
+  differ by 17% at identical total threads, and NUMA pinning made it *worse*. An earlier claim
+  in this file that KPM is "memory-bandwidth bound" was wrong.
+  Corollaries: keep total threads at or below the PHYSICAL core count (using SMT siblings
+  costs throughput); do not `taskset`-pin (it created stragglers on the nodes holding the
+  shared Julia sysimage page cache); use dynamic work assignment, since at 8x16 the batch span
+  was 105.6 s against a 70 s mean and one straggler paces everything.
+- **`relax_attempts` must stay at 1.** The escalation loop in `sv_kpm_context` breaks on
+  `minimize_energy!`'s convergence *flag*, not on a KPM rejection, and at 9 T the flag never
+  trips -- so anything above 1 escalates maxiters 1000 -> 4000 -> 16000 unconditionally,
+  chasing exactly what this file says to ignore. Measured: **21.8x the relaxation cost for
+  5.8e-9 in E/site**, and the spectrum changes by at most 0.12%, ~100x below the realization
+  floor. `sv_neutron_curves` defaulted to 3 until 519cf2f and silently cost ~1.55x on every
+  neutron evaluation. Raise it only if KPM actually rejects states -- that is a
+  *regularization* problem, not a maxiters problem.
 - `sv_interp1` returns NaN outside the measured range. The M(H) data span
   0.0225-6.975 T; the objective configs use 0.2-6.8 T for margin, which discards
   usable low-field data (see open threads).
