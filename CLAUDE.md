@@ -17,6 +17,39 @@ about whether the crystal-field broadening is site mixing or CEF-phonon coupling
 Status: a minimal single-disordered-phase model reproduces M(H) semi-quantitatively
 (rms 0.004 uB against a 1.12 uB signal) and the 1D neutron cuts qualitatively.
 
+### Why the published model is decisively wrong, not merely a worse fit
+
+This is the core of the argument and is **not** a matter of comparing chi2 values. Five
+independent observations, four of them qualitative:
+
+1. **High-field neutron diffraction sees only k = 0.** Field-induced on-site moments and
+   **no k != 0 peaks whatsoever.** The published clean model requires structured non-k=0
+   order; those phases are simply absent. **This dataset is not yet in the repo** -- it
+   lives only in this note and in the experimenter's records, so do not assume a file
+   exists for it.
+2. **M(H) shows no plateau.** Simulations at the published parameters give a rich
+   structured phase diagram with a clear magnetization plateau. The measurement is a
+   monotonic, slope-changing approach to saturation -- exactly what the disorder model
+   produces and nothing like the clean model.
+3. **The Bag et al. zero-field neutron fits are not even qualitatively right.**
+4. **The high-field magnon widths exceed the instrumental resolution by a lot, and are
+   NOT Lorentzian.** So the broadening is inhomogeneous -- a distribution of parameters --
+   not lifetime/time broadening. This is direct evidence for disorder as the mechanism.
+5. **Crystal field and diffraction data must use a disorder model to fit at all.**
+
+Consequences for how to work here. XXZ anisotropy (the literature uses Delta ~ 1.35) may
+eventually prove necessary, but it is **unlikely to be the main story, and if needed it
+goes ON TOP OF the disorder model, not instead of it.** Do not read a poor chi2 on the
+dispersive cuts as support for the published model -- see the K/M misfit note under
+Established results.
+
+Also note that **J1 and most other parameters were inherited from the earlier analytical
+model**, which cannot represent mode mixing between the different exchange environments.
+Sunny/KPM can. So the mean of the J1 distribution shifting once a proper disorder
+distribution is used is *expected*, not a red flag. The old analytical co-refinement had a
+known unresolved discrepancy of exactly this kind: the isolated "flat" neutron mode was
+taking up work that mode mixing of the exchange-broadened spectrum should have done.
+
 ## Layout
 
 ```text
@@ -135,6 +168,15 @@ Reading order for the current work: `docs/largecell_mvh_classical.md`,
   "did Gamma move?" consistency check reported success. Always finish with a joint step, and
   note that an UNWEIGHTED six-cut sum is dominated by whichever cuts fit worst -- the DGX
   measured the same parameter point scoring ~9 on `(0,1,0)` alone and ~216 on all six.
+- **The model fits the zone centre well and the dispersive cuts badly, and that split is
+  informative.** On `(0,1,0)` the best `chi2_red` is 8.96; at K and M it is 164-285 per cut,
+  i.e. **~25x worse**. Gamma tests only the Zeeman sector (`gzz`, `sigma_gzz`) and the model
+  gets it right; K and M test the exchange Hamiltonian and it does not. On the K/M surface
+  `chi2` rises monotonically with `J1` and falls monotonically with `sigma_J`, with the
+  minimum on BOTH grid edges (`J1` low, `sigma_J` high) -- a fit running away in two
+  directions at once, which is a symptom of model misspecification rather than a parameter
+  waiting to be tuned. Note `sigma_J` lowers `chi2` at *every* `J1` with no crossing, so it
+  is absorbing misfit generally rather than trading off against the bandwidth.
 - **The M(H) linear term is not Van Vleck.** The crystal field gives
   `chi_VV^zz = 0.0171 +- 0.0007 uB/T`; the fit wants 0.0368, a factor 2.2 more.
 
@@ -205,7 +247,13 @@ so the objective is deterministic in the parameters. Validate any optimum at
    at high disorder? M(H) no longer does.
 5. Where does the excess linear M(H) term come from, if not Van Vleck? Suspect the
    normalization of the digitized data, an impurity, or model error.
-6. Zero field. The published claim is a zero-field statement and everything here is
+6. **Non-Gaussian disorder distributions.** If quantitative agreement keeps failing, the
+   next thing to try is a non-Gaussian distribution of `gzz` and/or `J`, NOT more XXZ.
+   There is a physical reason to expect this: Zn/Ga site mixing gives each magnetic site a
+   *discrete* count of Ga vs Zn neighbours, so the natural distribution is multinomial over
+   local environments -- multi-modal, not a smooth Gaussian. A Gaussian is the convenient
+   parameterisation, not the physically motivated one. Deliberately deferred, not dismissed.
+7. Zero field. The published claim is a zero-field statement and everything here is
    field-polarized. Hard: no polarized reference state, LSWT invalid, and classical
    statistics is a poor approximation at the 0.07 K neutron temperature.
 
