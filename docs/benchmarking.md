@@ -412,6 +412,186 @@ reproducible call to call -- the device's representative `de` came out 6.7615 in
 Float64 run and 6.8701 in the Float32 run from the same host object. That puts a floor
 on cross-path reproducibility independent of everything above.
 
+### How work is launched matters ~19x (DGX, 2026-07-31)
+
+Measured on `neutrons-dgx01`: 2x AMD EPYC 7742, 256 logical CPUs, 128 physical cores,
+2 sockets, **8 NUMA nodes of 16 physical cores each**. One 81-q spectrum at 36x36x1,
+tol 0.05, kernel 0.05 meV, regularization 1e-5, by-eye set with gzz = 3.35. A file
+barrier synchronises the timed phase so JIT and startup are excluded. Unpinned unless
+noted.
+
+| config | total threads | s / spectrum | aggregate throughput |
+|--------|--------------|--------------|----------------------|
+| 1 x 128 | 128 | 21.96 | 0.046 spec/s |
+| 1 x 16  | 16  | 11.25 | 0.089 |
+| 8 x 16 **pinned** | 128 | 12.72 | 0.455 |
+| 8 x 16  | 128 | 11.12 | 0.666 |
+| 16 x 8  | 128 | 18.07 | 0.778 |
+| **32 x 4** | 128 | 32.39 | **0.859** |
+| 32 x 8  | 256 | 51.32 | 0.576 |
+
+Aggregate throughput is the measured quantity and is what the table is for. Note that
+**s/spectrum is NOT comparable across rows**: at high process counts it includes
+inter-process contention, so it cannot be divided by a serial time to get a
+thread-scaling efficiency. An earlier version of this section did exactly that, using
+an unmeasured ~130 s single-thread baseline, and reported efficiencies that a later
+spot check contradicted -- a single process at 2 threads takes 25.83 s, which cannot
+be reconciled with `32 x 4` at 32.39 s if both were pure thread scaling. The
+intra-process scaling curve needs its own measurement on an idle box, at fixed
+process count and varying threads; until then the mechanism below is inference from
+the throughput column alone.
+
+**One process with 128 threads is the worst configuration measured**: 0.046 spec/s
+against 0.859 for `32 x 4`, a factor of 18.7. Both of those are single-process-count
+comparisons of aggregate throughput, so the factor is sound. It is also slower *per
+spectrum* (21.96 s) than a single process at 16 threads (11.25 s) -- a like-for-like
+comparison, since both are one uncontended process -- so q-threading does scale
+negatively somewhere between 16 and 128 threads. CLAUDE.md's "run anything with KPM or
+realization averaging under `julia -t auto`" is correct on a desktop and harmful here.
+
+**The ceiling is process-internal, not the memory system.** Three independent facts
+rule out a shared bandwidth limit: per-process throughput stayed flat as processes
+were added; `8 x 16` and `16 x 8` differ by 17% at *identical* total thread count;
+and pinning made things worse. The limit is synchronisation or per-chunk overhead in
+the q-loop. An earlier reading of the single-process 16.6x plateau as "the
+memory-bandwidth wall" was wrong.
+
+**Pinning hurts.** `taskset` to one node's 16 physical cores produced stragglers:
+`/proc/<pid>/numa_maps` showed only 64.4% of *anonymous* heap on the pinned node
+(27.5% on N6), while 76.4% of *file-backed* pages sat on N7 -- the shared Julia
+sysimage every process reads. The slow processes were exactly those on nodes 6 and 7
+(17.59 s and 14.58 s against 10.45-12.40 s elsewhere). Pinning bought little locality
+and removed the ability to migrate away from congested nodes. `numactl` is not
+installed, so `--membind` could not be enforced.
+
+**Stragglers pace the batch.** At `8 x 16` pinned the span was 105.6 s against a 70 s
+mean, with barrier sync exact to 0.04 s. A fan-out driver should use dynamic work
+assignment, not static equal splits.
+
+Rules of thumb for this box:
+
+- Total threads ~= 128 (the physical core count). `32 x 8` = 256 threads was *worse*
+  than `32 x 4` = 128, so SMT siblings cost throughput.
+- Fan out over processes; thread only to 4-8 per process.
+- Do not pin.
+- Half the box can stay free for other users at no throughput cost: `32 x 4` uses 128
+  of 256 logical CPUs and is the best config measured. Memory there is 60 GB.
+- Whether throughput keeps rising as threads-per-process -> 1 (pure task parallelism)
+  is UNMEASURED. An earlier extrapolation to ~1.0 spec/s rested on the discredited
+  efficiency model above and should not be relied on. `32 x 4` at 0.859 spec/s is the
+  best measured point.
+
+### Intra-process thread scaling, measured properly (DGX, 2026-07-31)
+
+Single process, idle box, uncontended, 81 q at 36x36x1, BLAS pinned to 1. Every row is
+one uncontended process, so unlike the multi-process table above, per-spectrum times
+here ARE comparable and speedup is meaningful.
+
+| threads | chunks | s / spectrum | speedup | efficiency |
+|---------|--------|--------------|---------|------------|
+| 1   | 1  | 44.85 | 1.00 | 100% |
+| 2   | 2  | 23.65 | 1.90 | 95% |
+| 4   | 4  | 12.74 | 3.52 | 88% |
+| 8   | 8  | 8.56  | 5.24 | 65% |
+| 16  | 16 | 7.64  | **5.87** (peak) | 37% |
+| 32  | 32 | 8.69  | 5.16 | 16% |
+| 64  | 64 | 15.26 | 2.94 | 5% |
+| 128 | 81 | 20.18 | 2.22 | 2% |
+
+True single-thread cost is **44.85 s**. Speedup peaks at 5.87x on 16 threads and then
+falls. `chunks` is capped at `nq = 81`, so the 128-thread row is really 81 chunks.
+
+**Cause, and a library optimisation.** `_sv_kpm_fill_intensity!` constructs
+`SpinWaveTheoryKPM` *inside* the `Threads.@threads` loop, so every `intensities` call
+rebuilds one KPM object per chunk. Construction measured at 36x36x1: mean 0.356 s,
+range 0.166-0.917 s. At 81 chunks that is 81 constructions against only 44.85/81 =
+0.55 s of per-chunk work, so construction dominates -- its cost grows linearly with
+chunk count while the work per chunk shrinks, which is the shape above. A harness that
+pre-built the per-chunk objects OUTSIDE the timed region reached 16.6x at 81 chunks
+where the library peaks at 5.87x, so caching them on the context looks worth up to
+~2.8x. (Indicative: that 16.6x was at canonical parameters with Sunny's 1e-8
+regularization default.)
+
+Practical: 16 threads minimises latency per evaluation, 2-4 threads maximises
+throughput per core, and the process fan-out above beats both.
+
+### Q-sampling and the momentum-resolution quadrature (DGX, 2026-07-31)
+
+gzz = 3.350, (0,1,0) cuts, 4 realizations under common random numbers, regularization
+1e-5 pinned, no escalation. `grid` is `analytical_cut_volume_grid`, `MC` is
+`analytical_cut_volume_mc` at matched q.
+
+**How the quadrature bug was found.** Grid and MC disagreed by 0.70% at 625 q, and two
+samplers of one integral cannot converge to different values. They were convolving
+different kernels: `grid_nsigma = 1.5` (truncated then renormalised) against
+`resolution_nsigma_clip = 3.0`. Measuring the width `sv_gaussian_grid_axis` actually
+realised showed the production setting (n = 3, nsigma = 1.5) was **5.9% too narrow**,
+that raising `grid_nsigma` at n = 3 was catastrophic (-55.8% at 3 sigma, since three
+nodes at +/-3 sigma put ~98% of the weight at the centre), that adding nodes at
+nsigma = 1.5 also degraded it (-19.8% at n = 9), and that 3-node **Gauss-Hermite is
+exact** at the same cost. Fixed in `d2166ff` via Golub-Welsch, exact for any n, with the
+legacy rule retained as `resolution_quadrature = "truncated_gaussian_grid"` and its
+5.9% error pinned by a test.
+
+**Effect of the fix, and where the residual went.**
+
+| sampler | q | pre-fix | post-fix |
+|---------|---|---------|----------|
+| grid | 81  | 9.007105 | 8.950716 |
+| grid | 625 | 9.002427 | 8.893709 |
+| MC   | 81  | 8.898857 | 8.898353 |
+| MC   | 625 | 8.939591 | 8.939148 |
+| **grid625 - MC625** | | **+0.70%** | **-0.49%** |
+
+MC barely moved, since it never used the grid quadrature. The grid moved down and the
+sign of the gap **inverted**: pre-fix the grid was the narrower kernel, post-fix it is
+exact and MC is marginally narrower. The gap shrank only 28%, so it was tempting to
+blame MC's 3 sigma clip -- but widening that clip to 8 sigma moved chi2 by only
+**0.024%** (8.939148 -> 8.937000), which **refutes** that explanation. The residual is
+MC's own 1/sqrt(N) convergence: at 625 events it still carries ~0.5% error, consistent
+with mc81 -> mc625 having moved 0.46%. So the fix is complete, and `grid625` is the
+trustworthy value.
+
+**Which axis limits convergence.** Total q is
+`(n_measured_h * n_measured_k) * (n_h * n_k)`, so 225 q can be spent either way:
+
+| configuration | q | chi2_red | vs grid625 | compute |
+|---------------|---|----------|------------|---------|
+| 3x3 measured x 3x3 resolution | 81  | 8.950716 | +0.64% | 108.1 s |
+| 3x3 measured x 5x5 resolution | 225 | 8.956555 | +0.71% | 197.4 s |
+| **5x5 measured x 3x3 resolution** | **225** | **8.888533** | **-0.058%** | **193.9 s** |
+| 5x5 measured x 5x5 resolution | 625 | 8.893709 | -- | 440.5 s |
+
+The **measured** axis is the constraint; extra resolution nodes buy nothing. That is
+exactly what Gauss-Hermite predicts, since 3 nodes are already exact for the Gaussian's
+second moment.
+
+**Production setting: 5x5 measured x 3x3 Gauss-Hermite resolution = 225 q.** It reaches
+0.058% of the 625-q answer at 1.79x the cost of 81 q (sub-linear in q because threading
+is more efficient at larger q). Note this SUPERSEDES an earlier conclusion here that
+81 q was converged to 0.05% -- that was measured against the legacy 5.9%-narrow kernel,
+and the fix reopened the question: post-fix, 81 q is 0.64% off and the grid's
+convergence advantage over MC disappears. 0.64% is still far below the 12-15%
+realization floor, so 81 q is *usable*; it is not *converged*.
+
+### The disorder-realization floor is robust
+
+Shape spread rms across 6 realizations, `[0.5, 3.0]` meV, unit-integral normalised,
+sigma_J = 0.5, sigma_gzz = 0.8, mean over the 6 cuts:
+
+| condition | mean floor |
+|-----------|------------|
+| gzz = 3.35, 81 q  | 0.1362 |
+| gzz = 3.80, 81 q  | 0.1373 |
+| gzz = 3.80, 625 q | 0.1372 |
+
+So the ~12-15% floor is **independent of gzz and of q count** -- as it should be, since
+realization scatter is physical rather than a sampling artefact. Per-cut range is
+0.080-0.191, and amplitude spread is far smaller (0.1-4.6%): g-disorder redistributes
+weight in energy without changing the integrated moment. Averaging n realizations cuts
+this as 1/sqrt(n), but under common random numbers the draw is frozen and the residual
+is a shared offset rather than noise the optimiser chases.
+
 ### Projected cost of a full 1D comparison
 
 Six cuts (3 qtags x 2 fields), using the measured 3.04x threaded plateau:
