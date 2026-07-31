@@ -1,0 +1,84 @@
+# Overplot the six 1D neutron cuts against experiment for several NAMED parameter sets,
+# so the comparison is "did the lineshape improve" rather than "did chi2 go down".
+#
+#   julia -t auto --project=. scripts/plot_neutron_parameter_sets.jl
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/neutron_parameter_sets"
+table_subdir = "results/feature_tables/sunny_validation/neutron_parameter_sets"
+
+[run]
+cell_size = [36, 36, 1]
+seed_dims = [3, 3, 1]
+
+# Cost is one full six-cut evaluation per set, ~8 min each at 36x36x1 with 4 realizations,
+# so keep the set list short. 4 realizations leaves a ~6% scatter on the mean given the
+# 12-15% per-realization floor -- fine for comparing lineshapes by eye, not for resolving
+# chi2 differences of a few percent.
+n_realizations = 4
+minimize_maxiters = 1000
+relax_attempts = 1
+
+# Y range for each panel is set from the inelastic signal above this energy. The elastic
+# line and the model's quasi-elastic divergence at large sigma_J are orders of magnitude
+# larger than the magnon signal and would flatten every panel.
+elastic_cutoff_meV = 0.35
+
+include_flat = false
+
+# Base parameters; each [[sets]] entry overrides on top of these.
+[run.param_overrides]
+J2_meV = 0.01
+
+# The by-eye neutron parameters, which every earlier figure and chi2 in this repo used.
+[[sets]]
+name = "by-eye"
+J1_meV = 0.25
+sigma_J = 0.5
+gzz = 3.8
+sigma_gzz = 0.8
+
+# Best point reached by the Gamma-first scan's stage-4 joint refinement on the corrected
+# Gauss-Hermite kernel: chi2_red 149.8 -> 47.2 over sweep 1, then -> 33.5 -> 24.1 in
+# sweep 2, a 6.2x improvement overall. The run was stopped here, still improving, so this
+# is the best KNOWN point rather than a converged optimum.
+#
+# The striking part is which parameters moved and which did not. BOTH disorder widths land
+# exactly on the by-eye values -- sigma_J = 0.50 and sigma_gzz = 0.80 -- while J1 drops
+# 0.25 -> 0.15 and gzz drops 3.8 -> 3.5. So the by-eye disorder was right and it is the
+# exchange and g magnitudes that were off, which is consistent with both having been
+# inherited from the analytical model that cannot represent mode mixing between exchange
+# environments.
+[[sets]]
+name = "fitted"
+J1_meV = 0.15
+sigma_J = 0.50
+gzz = 3.50
+sigma_gzz = 0.80
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.kpm]
+system_size = [36, 36, 1]
+dims = [3, 3, 1]
+repeat_factor = [12, 12, 1]
+maxiters = 1000
+regularization = 1e-5
+tol = 0.02
+
+[control_overrides.kpm.experimental_histogram]
+enabled = true
+mode = "analytical_cut_volume_grid"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+
+[control_overrides.kpm.q_averaging]
+enabled = true
+n_h = 3
+n_k = 3
+n_l = 1
