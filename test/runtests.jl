@@ -326,4 +326,64 @@ end
         :truncated_gaussian_grid
 end
 
+@testset "cached KPM operators are bit-identical to fresh builds" begin
+    # SpinWaveTheoryKPM construction is ~0.36 s at 36x36x1 and was happening once per
+    # chunk on EVERY intensities call, so a context serving several cuts rebuilt identical
+    # operators for each. Reuse is only sound if the object carries no state across calls;
+    # the plausible failure is buffers sized by the first call's q count, which would
+    # silently corrupt later calls. Bit-identity is the acceptance criterion -- anything
+    # less and the speedup is not worth having.
+    controls = SV.sv_load_controls(REPO_ROOT)
+    controls["kpm"]["system_size"] = [12, 12, 1]
+    controls["kpm"]["dims"] = [3, 3, 1]
+    controls["kpm"]["repeat_factor"] = [4, 4, 1]
+    controls["kpm"]["maxiters"] = 500
+    controls["kpm"]["regularization"] = 1e-5
+    (; params) = SV.sv_load_params(REPO_ROOT, controls)
+    params = merge(params, (; J1_meV=0.25, J2_meV=0.01, sigma_J=0.5,
+                              gzz=3.35, sigma_gzz=0.8))
+    ctx = SV.sv_kpm_context(params, controls; component=:dispersive, field_T=9.0,
+                            realization=0, maxiters=500, relax_attempts=1)
+    @test !isnothing(get(ctx, :swt_cache, nothing))   # on by default
+
+    energies = collect(range(0.0, 4.0; length=21))
+    kern = gaussian(fwhm=0.05)
+    mkqs(n) = [[0.33 + 0.01*i, 0.33 + 0.005*i, 0.0] for i in 1:n]
+    function fill_it(qs, nchunks, cache)
+        I0 = zeros(Float64, length(energies), length(qs))
+        SV._sv_kpm_fill_intensity!(I0, ctx.sys, controls, qs, energies, kern, 0.05, 1e-5,
+                                   nchunks, length(energies), length(qs); cache)
+        return I0
+    end
+
+    # Repeated calls through one cached pool must match fresh builds exactly.
+    cache = Dict{Any,Any}()
+    qs = mkqs(12)
+    ref = fill_it(qs, 4, nothing)
+    for _ in 1:3
+        @test fill_it(qs, 4, cache) == ref
+    end
+
+    # The dangerous case: DIFFERENT q counts reusing the same pooled operators.
+    cache2 = Dict{Any,Any}()
+    for n in (12, 6, 18, 12)
+        qsn = mkqs(n)
+        @test fill_it(qsn, 4, cache2) == fill_it(qsn, 4, nothing)
+    end
+
+    # Keyed on nchunks, so changing the chunk count must build a new pool rather than
+    # reuse a wrongly sized one. Three distinct chunk counts => exactly three keys.
+    cache3 = Dict{Any,Any}()
+    for nch in (1, 4, 8, 4, 1)
+        @test fill_it(qs, nch, cache3) == fill_it(qs, nch, nothing)
+    end
+    @test length(cache3) == 3
+
+    # The escape hatch must actually disable it.
+    controls["kpm"]["cache_kpm_operators"] = false
+    ctx2 = SV.sv_kpm_context(params, controls; component=:dispersive, field_T=9.0,
+                             realization=0, maxiters=500, relax_attempts=1)
+    @test isnothing(get(ctx2, :swt_cache, nothing))
+end
+
 end

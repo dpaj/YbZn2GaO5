@@ -2793,10 +2793,15 @@ function sv_kpm_context(params, controls::Dict; component::Symbol=:dispersive,
         @warn "Ground state did not converge after escalating maxiters; SpinWaveTheoryKPM may reject it as not an energy minimum." component field_T realization maxiters_final = iters E_per_site = E maxlog = 5
     end
 
+    # Per-context pool of KPM operators, keyed by (nchunks, tol, regularization). They
+    # depend only on sys/tol/reg, all fixed for this context's lifetime, so every cut this
+    # context serves can share them instead of rebuilding at ~0.36 s per chunk per call.
+    swt_cache = Bool(get(kc, "cache_kpm_operators", true)) ? Dict{Any,Any}() : nothing
     return (; sys, units, crystal=built.crystal, component, field_T=Float64(field_T),
               realization=Int(realization), repeat_factor=built.repeat_factor,
               E_per_site=E, minimize_seconds=t, minimize_result=res, converged,
-              cell_size=sizectl.system_size, maxiters=iters, maxiters_initial=iters0)
+              cell_size=sizectl.system_size, maxiters=iters, maxiters_initial=iters0,
+              swt_cache)
 end
 
 """
@@ -2838,20 +2843,47 @@ end
 # bit-identical to serial (pinned by test/runtests.jl); each chunk needs its own
 # SpinWaveTheoryKPM because `intensities` mutates its internal buffers, which is safe
 # since SpinWaveTheory clones the system.
+"""
+    _sv_kpm_swt_pool(cache, sys, controls, tol, reg, nchunks)
+
+One `SpinWaveTheoryKPM` per chunk, built once and reused when a cache is supplied.
+
+Construction is not cheap -- 0.36 s mean at 36x36x1 (range 0.17-0.92) -- and it happened
+once per chunk on EVERY `intensities` call, so a context serving several cuts rebuilt
+identical operators for each of them. The objects depend only on `sys`, `tol` and `reg`,
+all fixed for the lifetime of a context, so rebuilding is pure waste.
+
+Each chunk keeps its OWN object because chunks run concurrently; the pool is indexed by
+chunk, never shared between threads within a call. The cache is keyed on `nchunks` as well,
+since a different chunk count needs a differently sized pool, and on `tol`/`reg` because
+those change the operator.
+
+Pass `cache = nothing` to disable, which restores the original build-every-call behaviour.
+`[kpm].cache_kpm_operators = false` does the same from config, and exists because reuse is
+only safe if `intensities` does not carry state between calls -- pinned by
+`test/runtests.jl`, which requires bit-identical output with and without the cache,
+including across calls with DIFFERENT q counts.
+"""
+function _sv_kpm_swt_pool(cache, sys, controls, tol, reg, nchunks)
+    n = max(1, Int(nchunks))
+    build() = [SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=tol,
+                                 regularization=reg) for _ in 1:n]
+    cache === nothing && return build()
+    key = (n, Float64(tol), Float64(reg))
+    return get!(build, cache, key)
+end
+
 function _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol, reg,
-                                 nchunks, nE, nq)
+                                 nchunks, nE, nq; cache=nothing)
+    swts = _sv_kpm_swt_pool(cache, sys, controls, tol, reg, nchunks)
     if nchunks <= 1
-        swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=tol,
-                                regularization=reg)
-        res = intensities(swt, qs; energies, kernel)
+        res = intensities(swts[1], qs; energies, kernel)
         I0 .= sv_orient_sunny_intensity_matrix(sv_try_extract_sunny_intensity(res), nE, nq)
     else
         idxs = [c:nchunks:nq for c in 1:nchunks]
         Threads.@threads for c in eachindex(idxs)
             qc = qs[idxs[c]]
-            swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=tol,
-                                    regularization=reg)
-            res = intensities(swt, qc; energies, kernel)
+            res = intensities(swts[c], qc; energies, kernel)
             I0[:, idxs[c]] .= sv_orient_sunny_intensity_matrix(
                 sv_try_extract_sunny_intensity(res), nE, length(qc))
         end
@@ -2905,7 +2937,7 @@ function sv_kpm_spectrum_from_context(ctx, controls::Dict, cut::SVNeutronCut1D;
     for attempt in 1:max(1, attempts)
         try
             seconds += @elapsed _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol,
-                                    reg_used, nchunks, nE, nq)
+                                    reg_used, nchunks, nE, nq; cache=get(ctx, :swt_cache, nothing))
             break
         catch err
             msg = sprint(showerror, err)
