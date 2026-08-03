@@ -11,11 +11,20 @@
 # current best-fit model, and a raw estimate of the Ei = 4.65 background from the difference
 # between the two datasets. Both write separate files, so neither overwrites the other.
 #
-# "full" also includes `(0,1,0)`, which has no Ei = 3.32 counterpart, because its 0 T scan
-# is still a background probe: with no field-induced magnon at 0 T, anything sharp near
-# 2.08 meV there is background. That matters because the 9 T Gamma mode sits at ~1.85 meV,
-# only ~0.2 meV from the background spike, so whether Gamma is contaminated decides whether
-# the one clean gzz determination is clean after all.
+# "full" also includes `(0,1,0)`, which has no Ei = 3.32 counterpart, because its 0 T scan is
+# still a background probe. NOTE the 0 T data are NOT signal-free -- there is still a magnon,
+# just at lower energy, plus a diffuse zero-field continuum. What makes 0 T useful is that it
+# is expected signal-free in a LIMITED HIGH-ENERGY region, so the absence of a 2.08 meV spike
+# there is informative about background at that Q even though the scan as a whole is not a
+# background measurement.
+#
+# This is the same logic the background construction itself uses, and it is worth stating
+# because it explains the interpolation gap rather than merely describing it. The magnet
+# background sits at a fixed energy while the SIGNAL MOVES WITH FIELD, so min-over-fields
+# picks, at each energy, whichever field has its signal furthest away. The 0.75-2.5 meV gap
+# is precisely the range the signal SWEEPS THROUGH between 0 and 14 T, so no field leaves it
+# clean -- hence interpolation. By the same token the LOW-energy side of the background is
+# best estimated at 14 T, where the signal has moved up to ~2.1 meV and vacated it.
 #
 # WHY THIS IS THE RIGHT BACKGROUND DIAGNOSTIC
 #
