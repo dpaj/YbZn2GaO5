@@ -1,0 +1,63 @@
+# M(H) against experiment for several named parameter sets, including a clean control.
+#
+#   julia -t auto --project=. scripts/plot_mvh_parameter_sets.jl
+#
+# The test: the "neutron-optimum" set was fitted to the SPECTRA ALONE and never shown M(H).
+# M(H) constrains B_sat ~ J1/gzz, and the neutron fit lowered that ratio by about a third
+# relative to the by-eye pair -- toward what M(H) independently wants. If M(H) improves at
+# those parameters, it is cross-observable evidence needing no relative weighting.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/mvh_parameter_sets"
+table_subdir = "results/feature_tables/sunny_validation/mvh_parameter_sets"
+
+[run]
+# 12x12x1 is sufficient for M(H): realization scatter goes as N^-0.38 while cost goes as
+# N^1.40, so accuracy is bought with realizations rather than cell size, and the
+# ground-state texture has a correlation length of order one lattice constant.
+cell_size = [12, 12, 1]
+seed_dims = [3, 3, 1]
+n_realizations = 16
+minimize_maxiters = 2000
+
+# The M(H) data span 0.0225-6.975 T and sv_interp1 returns NaN outside that, so stay inside
+# with margin. A denser grid than the objective uses, because dM/dH is differentiated here
+# and a plateau has to be visible if it exists.
+field_min_T = 0.2
+field_max_T = 6.8
+n_fields = 34
+
+[run.param_overrides]
+J2_meV = 0.01
+
+# Fitted to the six 1D neutron cuts alone. Never shown magnetization data.
+[[sets]]
+name = "neutron-optimum"
+J1_meV = 0.15
+sigma_J = 0.50
+gzz = 3.50
+sigma_gzz = 0.80
+
+# The by-eye neutron parameters that every earlier figure in this repo used.
+[[sets]]
+name = "by-eye"
+J1_meV = 0.25
+sigma_J = 0.50
+gzz = 3.80
+sigma_gzz = 0.80
+
+# Control: same Hamiltonian, disorder switched OFF. Isolates what disorder contributes to
+# the lineshape of M(H) -- specifically the rounding of the approach to saturation and the
+# extra initial slope, both of which are present at T = 0 and are NOT thermal.
+[[sets]]
+name = "clean"
+J1_meV = 0.15
+sigma_J = 0.0
+gzz = 3.50
+sigma_gzz = 0.0
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
