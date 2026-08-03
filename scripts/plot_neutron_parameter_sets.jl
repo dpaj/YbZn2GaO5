@@ -62,10 +62,16 @@ isempty(applied) || @printf("base overrides: %s\n", join(applied, ", "))
 results = NamedTuple[]
 for (i, sd) in (PLOT_ONLY ? () : enumerate(sets))
     name = String(get(sd, "name", "set$i"))
-    over = NamedTuple(Symbol(k) => Float64(v) for (k, v) in sd if k != "name")
+    skip = ("name", "n_realizations")
+    over = NamedTuple(Symbol(k) => Float64(v) for (k, v) in sd if !(k in skip))
     p = merge(params0, over)
+    # A clean set (sigma_J = sigma_gzz = 0) draws the SAME system for every realization, so
+    # averaging over more than one is exactly redundant. Let a set override the count.
+    nr = Int(get(sd, "n_realizations", NREAL))
+    (p.sigma_J == 0 && p.sigma_gzz == 0 && nr > 1) &&
+        @warn "set $name has no disorder; its realizations are identical, so n_realizations > 1 is wasted" nr
     t = time()
-    o = SV.sv_neutron_objective(p, controls, CUTS; realizations=0:(NREAL - 1),
+    o = SV.sv_neutron_objective(p, controls, CUTS; realizations=0:(nr - 1),
         threaded=true, maxiters=MAXITERS, relax_attempts=RELAX, on_failure=:record)
     @printf("\n%-12s J1=%.3f sigma_J=%.2f gzz=%.2f sigma_gzz=%.2f -> chi2_red = %.4g  (%.0f s)\n",
             name, p.J1_meV, p.sigma_J, p.gzz, p.sigma_gzz, o.chi2_red, time() - t)
@@ -146,6 +152,10 @@ for (row, B) in enumerate(fields), (col, qt) in enumerate(qtags)
     e = [cnum(r, "Ierr_exp") for r in first_rows]
     errorbars!(ax, E, y, e; color = (:black, 0.45), whiskerwidth = 4)
     scatter!(ax, E, y; color = :black, markersize = 7, label = "experiment")
+    # A clean model's magnon is limited only by the instrument and the KPM kernel, so it is
+    # far taller and narrower than the data. Letting it set the y range would flatten every
+    # other curve, so it is excluded from the scale and allowed to clip.
+    noscale = String.(get(RUN, "ylim_exclude_sets", ["clean"]))
     vals = Float64[]
     append!(vals, filter(isfinite, y[E .>= ELASTIC_CUT]))
     for (k, nm) in enumerate(setnames)
@@ -156,7 +166,7 @@ for (row, B) in enumerate(fields), (col, qt) in enumerate(qtags)
         c2 = cnum(rs[1], "cut_chi2_red")
         lines!(ax, Em, m; color = cols[mod1(k, length(cols))], linewidth = 2.6,
                label = "$nm  (chi2=$(round(Int, c2)))")
-        append!(vals, filter(isfinite, m[Em .>= ELASTIC_CUT]))
+        nm in noscale || append!(vals, filter(isfinite, m[Em .>= ELASTIC_CUT]))
     end
     # The elastic line and any quasi-elastic divergence are orders of magnitude above the
     # magnon signal and would flatten every panel, so scale y from the inelastic region.

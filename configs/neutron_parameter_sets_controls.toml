@@ -27,6 +27,8 @@ elastic_cutoff_meV = 0.35
 
 include_flat = false
 
+ylim_exclude_sets = ["clean"]
+
 # Base parameters; each [[sets]] entry overrides on top of these.
 [run.param_overrides]
 J2_meV = 0.01
@@ -56,6 +58,25 @@ J1_meV = 0.15
 sigma_J = 0.50
 gzz = 3.50
 sigma_gzz = 0.80
+
+# Control: the SAME exchange and g magnitudes with all disorder switched OFF. This is the
+# plot that shows disorder is required rather than merely helpful -- a clean magnon is limited
+# only by the instrument and the KPM kernel, whereas the measured high-field magnon widths
+# exceed the instrumental resolution substantially AND are not Lorentzian, so the broadening
+# is inhomogeneous (a parameter distribution) rather than a lifetime effect.
+#
+# n_realizations = 1 because with sigma_J = sigma_gzz = 0 every realization draws the
+# identical system; averaging more would be exactly redundant.
+#
+# It is excluded from the y-axis scaling (ylim_exclude_sets) because its peak is far taller
+# and narrower than the data and would flatten every other curve.
+[[sets]]
+name = "clean"
+J1_meV = 0.15
+sigma_J = 0.0
+gzz = 3.50
+sigma_gzz = 0.0
+n_realizations = 1
 
 [control_overrides.common]
 field_direction = [0.0, 0.0, 1.0]

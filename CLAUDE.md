@@ -31,6 +31,19 @@ independent observations, four of them qualitative:
    structured phase diagram with a clear magnetization plateau. The measurement is a
    monotonic, slope-changing approach to saturation -- exactly what the disorder model
    produces and nothing like the clean model.
+
+   Provenance worth knowing, because it is not obvious from the repo. **Our M(H) is the only
+   available low-temperature set**: the original publication either did not measure
+   low-temperature magnetization or did not publish it. The same group later presented
+   magnetization at an APS Global Summit talk and explained it with a *phenomenological
+   singlet model*, which the experimenter here judges to be unfounded -- and critically,
+   **their M(H) curves are highly similar to ours**, so the measurement itself is
+   reproducible across groups even though the interpretation is disputed.
+
+   The published Hamiltonian's failure on M(H) is **far from even qualitative** agreement and
+   has already been demonstrated with separate scripts held outside this repo. It does NOT
+   need re-deriving here, and there is no need to build a published-Hamiltonian M(H)
+   comparison in this codebase.
 3. **The Bag et al. zero-field neutron fits are not even qualitatively right.**
 4. **The high-field magnon widths exceed the instrumental resolution by a lot, and are
    NOT Lorentzian.** So the broadening is inhomogeneous -- a distribution of parameters --
