@@ -79,7 +79,7 @@ for (i, sd) in (PLOT_ONLY ? () : enumerate(sets))
         @printf("    %-14s %5.1f T  chi2_red = %-10.4g rms = %.4g\n",
                 pc.qtag, pc.field_T, pc.chi2_red, pc.rms)
     end
-    push!(results, (; name, params=p, obj=o))
+    push!(results, (; name, params=p, obj=o, n_real=nr))
 end
 
 # ---------------------------------------------------------------- persist
@@ -100,15 +100,17 @@ if !PLOT_ONLY
         end
     end
     open(CURVE_CSV, "w") do io
-        println(io, "set,qtag,field_T,energy_meV,I_exp,Ierr_exp,I_model_scaled,cut_chi2_red")
+        println(io, "set,J1_meV,sigma_J,gzz,sigma_gzz,n_realizations,qtag,field_T," *
+                    "energy_meV,I_exp,Ierr_exp,I_model_scaled,cut_chi2_red")
         for r in results
             for (i, cut) in enumerate(CUTS)
                 m = r.obj.scale .* r.obj.curves[i]
                 c2 = r.obj.per_cut[i].chi2_red
                 for j in eachindex(cut.energy_meV)
-                    @printf(io, "%s,%s,%.1f,%.6g,%.6g,%.6g,%.6g,%.6g\n",
-                            r.name, cut.qtag, cut.field_T, cut.energy_meV[j],
-                            cut.intensity[j], cut.error[j], m[j], c2)
+                    @printf(io, "%s,%.4f,%.4f,%.4f,%.4f,%d,%s,%.1f,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+                            r.name, r.params.J1_meV, r.params.sigma_J, r.params.gzz,
+                            r.params.sigma_gzz, r.n_real, cut.qtag, cut.field_T,
+                            cut.energy_meV[j], cut.intensity[j], cut.error[j], m[j], c2)
                 end
             end
         end
@@ -128,7 +130,28 @@ for l in readlines(CURVE_CSV)[2:end]
 end
 cnum(r, k) = something(tryparse(Float64, get(r, k, "")), NaN)
 
-setnames = unique(String[r["set"] for r in crows])
+allsets = unique(String[r["set"] for r in crows])
+# Plot a SUBSET without recomputing: YZGO_PLOT_SETS="fitted,clean" or [run].plot_sets.
+wanted = let e = get(ENV, "YZGO_PLOT_SETS", "")
+    isempty(e) ? String.(get(RUN, "plot_sets", String[])) :
+                 String.(strip.(split(e, ',')))
+end
+setnames = isempty(wanted) ? allsets : [s for s in allsets if s in wanted]
+isempty(setnames) && error("plot_sets $(wanted) matched none of $(allsets)")
+if length(setnames) < length(allsets)
+    @printf("plotting %d of %d sets: %s  (available: %s)
+", length(setnames),
+            length(allsets), join(setnames, ", "), join(allsets, ", "))
+end
+# State provenance from the FILE rather than trusting the set name, since a set can be
+# re-run at different parameters under the same label.
+for nm in setnames
+    r = first(f for f in crows if f["set"] == nm)
+    @printf("  %-16s J1=%s sigma_J=%s gzz=%s sigma_gzz=%s  (%s realizations)
+", nm,
+            get(r, "J1_meV", "?"), get(r, "sigma_J", "?"), get(r, "gzz", "?"),
+            get(r, "sigma_gzz", "?"), get(r, "n_realizations", "?"))
+end
 qtags = unique(String[r["qtag"] for r in crows])
 fields = sort(unique(Float64[cnum(r, "field_T") for r in crows]))
 
@@ -158,7 +181,8 @@ for (row, B) in enumerate(fields), (col, qt) in enumerate(qtags)
     noscale = String.(get(RUN, "ylim_exclude_sets", ["clean"]))
     vals = Float64[]
     append!(vals, filter(isfinite, y[E .>= ELASTIC_CUT]))
-    for (k, nm) in enumerate(setnames)
+    for nm in setnames
+        k = findfirst(==(nm), allsets)     # colour follows the set, not its plot position
         rs = sel(nm)
         isempty(rs) && continue
         Em = [cnum(r, "energy_meV") for r in rs]
@@ -184,6 +208,8 @@ Label(fig[length(fields) + 1, 1:length(qtags)],
       "possibly Bragg scattering, so neither side is meaningful there.";
       fontsize = 11, color = :grey30)
 
-out = joinpath(FDIR, "neutron_parameter_sets.png")
+# Name the file after the subset, so replotting a selection never clobbers the full figure.
+const SUFFIX = length(setnames) == length(allsets) ? "" : "_" * join(setnames, "_")
+out = joinpath(FDIR, "neutron_parameter_sets$(SUFFIX).png")
 save(out, fig; px_per_unit = 2)
 println("wrote $out")
