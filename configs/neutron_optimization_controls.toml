@@ -1,0 +1,157 @@
+# Multi-start Nelder-Mead on the six-cut neutron objective, plus the follow-up analysis
+# (profile likelihood, seed validation, M(H) cross-check).
+#
+#   scripts/run_neutron_optimization_weekend.sh
+#
+# One process per start at -t 4. Intra-process q-threading is only ~73% efficient at 4
+# threads and saturates near 3.4x at 32, so 8 x 4 beats 1 x 32 severalfold.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+table_subdir = "results/feature_tables/sunny_validation/neutron_optimization"
+figure_subdir = "results/figures/sunny_validation/neutron_optimization"
+
+[run]
+cell_size = [36, 36, 1]
+seed_dims = [3, 3, 1]
+
+# 81 q rather than the 225 q the DGX showed is properly converged (0.058% vs 0.64%). 225 q
+# costs 1.79x, and the 0.6% it buys sits far below BOTH the 12-15% realization floor and the
+# background systematic -- roughly 70% of the [0.5, 3.0] meV fit window rests on
+# PCHIP-interpolated background. Spending 44% of the compute on it would be the wrong trade.
+# The final optimum is confirmed once at 225 q by the follow-up script.
+n_realizations = 4
+minimize_maxiters = 1000
+relax_attempts = 1
+
+free_parameters = ["J1_meV", "sigma_J", "gzz", "sigma_gzz"]
+lower_bounds = [0.05, 0.00, 2.8, 0.0]
+# sigma_J capped at 0.60: it is FRACTIONAL, so bonds change sign when randn < -1/sigma_J --
+# ~5% of bonds at 0.60 but ~16% at 1.0. Past ~0.6 this becomes a random-sign bond model,
+# which is different physics from the disorder claim being tested.
+upper_bounds = [0.40, 0.60, 4.2, 1.4]
+
+max_iterations = 200
+time_limit_hours = 30.0
+
+include_flat = false
+
+[run.param_overrides]
+J2_meV = 0.01
+
+# ---------------------------------------------------------------- follow-up stages
+[followup]
+# Profile likelihood: each free parameter scanned with the others held at the optimum.
+# Gives chi2 curves and therefore actual error bars, which no parameter in this repo has yet.
+profile_points = 7
+profile_span_fraction = 0.45      # +/- 45% of the optimum, clipped to the bounds
+
+# Seed validation. Everything so far uses seed 20260611 with realizations 0-3, so the
+# optimum has never been tested against a different disorder draw -- the M(H) protocol
+# requires this and the neutron side has never done it.
+validation_seeds = [20260611, 771, 20240917]
+validation_realizations = 8
+
+# Confirm the optimum once at the properly converged q setting.
+confirm_measured_side = 5
+confirm_resolution_side = 3
+
+# M(H) cross-check. Cheap (12x12x1) and never done at the neutron-fitted parameters.
+# M(H) constrains B_sat ~ J1/gzz; the by-eye pair gives ~5.1 T where M(H) wants ~4.0 T, and
+# the fitted pair moves that ratio DOWN by roughly a third -- toward what M(H) independently
+# prefers. If that holds it is cross-observable evidence obtained without choosing weights.
+mvh_cell_size = [12, 12, 1]
+mvh_realizations = 8
+mvh_field_min_T = 0.2
+mvh_field_max_T = 6.8
+mvh_n_fields = 24
+
+# Post-cache intra-process thread curve. The existing numbers predate the KPM operator
+# cache, and the DGX saw their peak move 5.87x -> 13.51x with the knee shifting 16 -> 64
+# threads, so this box's curve is stale. Cheap, and it sets the launch recipe from here on.
+thread_curve_chunks = [1, 2, 4, 8, 16, 32]
+
+# ---------------------------------------------------------------- starts
+# Eight starts spanning the box: the current best, the by-eye set, the canonical analytical
+# values, the Gamma-only optimum, and four spread points to expose multiple minima.
+[[starts]]
+name = "fitted"
+J1_meV = 0.15
+sigma_J = 0.50
+gzz = 3.50
+sigma_gzz = 0.80
+
+[[starts]]
+name = "byeye"
+J1_meV = 0.25
+sigma_J = 0.50
+gzz = 3.80
+sigma_gzz = 0.80
+
+[[starts]]
+name = "canonical"
+J1_meV = 0.23
+sigma_J = 0.24
+gzz = 3.78
+sigma_gzz = 0.39
+
+[[starts]]
+name = "gamma_opt"
+J1_meV = 0.15
+sigma_J = 0.50
+gzz = 3.30
+sigma_gzz = 0.90
+
+[[starts]]
+name = "lowJ_lowdis"
+J1_meV = 0.10
+sigma_J = 0.20
+gzz = 3.60
+sigma_gzz = 0.50
+
+[[starts]]
+name = "midJ_highdis"
+J1_meV = 0.20
+sigma_J = 0.55
+gzz = 3.40
+sigma_gzz = 1.10
+
+[[starts]]
+name = "highJ_lowg"
+J1_meV = 0.32
+sigma_J = 0.35
+gzz = 3.10
+sigma_gzz = 0.70
+
+[[starts]]
+name = "published"
+J1_meV = 0.25
+sigma_J = 0.10
+gzz = 3.44
+sigma_gzz = 0.20
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.kpm]
+system_size = [36, 36, 1]
+dims = [3, 3, 1]
+repeat_factor = [12, 12, 1]
+maxiters = 1000
+regularization = 1e-5
+tol = 0.02
+
+[control_overrides.kpm.experimental_histogram]
+enabled = true
+mode = "analytical_cut_volume_grid"
+n_measured_h = 3
+n_measured_k = 3
+n_measured_l = 1
+
+[control_overrides.kpm.q_averaging]
+enabled = true
+n_h = 3
+n_k = 3
+n_l = 1
