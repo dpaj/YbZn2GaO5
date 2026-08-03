@@ -3,6 +3,19 @@
 # Sunny, no KPM, so it runs in about a minute.
 #
 #   julia --project=. scripts/plot_neutron_1d_two_incident_energies.jl
+#   YZGO_EI_OVERLAY=full julia --project=. scripts/plot_neutron_1d_two_incident_energies.jl
+#
+# TWO MODES. The default ("raw") is the clean two-dataset comparison and is deliberately
+# left alone -- it is the figure that isolates the background question with nothing else in
+# the way. "full" adds the background that was actually subtracted, the corrected data, the
+# current best-fit model, and a raw estimate of the Ei = 4.65 background from the difference
+# between the two datasets. Both write separate files, so neither overwrites the other.
+#
+# "full" also includes `(0,1,0)`, which has no Ei = 3.32 counterpart, because its 0 T scan
+# is still a background probe: with no field-induced magnon at 0 T, anything sharp near
+# 2.08 meV there is background. That matters because the 9 T Gamma mode sits at ~1.85 meV,
+# only ~0.2 meV from the background spike, so whether Gamma is contaminated decides whether
+# the one clean gzz determination is clean after all.
 #
 # WHY THIS IS THE RIGHT BACKGROUND DIAGNOSTIC
 #
@@ -59,6 +72,46 @@ end
 const EI_HI = 4.65
 const EI_LO = 3.32
 const TBASE = 0.07
+const MODE = lowercase(get(ENV, "YZGO_EI_OVERLAY", "raw"))
+MODE in ("raw", "full") || error("YZGO_EI_OVERLAY must be raw or full, got $MODE")
+
+# In "full" mode, pull in the background-corrected cuts (which carry raw_intensity,
+# background and corrected intensity on ONE consistent scale, since intensity = raw - bg)
+# and the saved best-fit model curves. Nothing is recomputed: the model comes from the CSV
+# that scripts/plot_neutron_parameter_sets.jl already wrote, so this stays a data-only script.
+corrected = Dict{Tuple{Float64,String},Any}()
+model = Dict{Tuple{Float64,String},Tuple{Vector{Float64},Vector{Float64}}}()
+if MODE == "full"
+    for c in SV.sv_load_kpm_experimental_cuts(REPO_ROOT, controls)
+        corrected[(c.field_T, c.qtag)] = c
+    end
+    mp = SV.sv_repo_path(REPO_ROOT,
+        "results/feature_tables/sunny_validation/neutron_parameter_sets/model_curves.csv")
+    if isfile(mp)
+        lines = filter(!isempty, strip.(readlines(mp)))
+        hdr = String.(split(lines[1], ','))
+        want = get(ENV, "YZGO_MODEL_SET", "fitted")
+        acc = Dict{Tuple{Float64,String},Vector{Tuple{Float64,Float64}}}()
+        for l in lines[2:end]
+            f = String.(split(l, ','))
+            length(f) == length(hdr) || continue
+            d = Dict(zip(hdr, f))
+            get(d, "set", "") == want || continue
+            B = something(tryparse(Float64, get(d, "field_T", "")), NaN)
+            E = something(tryparse(Float64, get(d, "energy_meV", "")), NaN)
+            I = something(tryparse(Float64, get(d, "I_model_scaled", "")), NaN)
+            (isfinite(B) && isfinite(E)) || continue
+            push!(get!(acc, (B, get(d, "qtag", "")), Tuple{Float64,Float64}[]), (E, I))
+        end
+        for (k, v) in acc
+            sort!(v; by = first)
+            model[k] = (first.(v), last.(v))
+        end
+        @printf("loaded model set '%s' for %d (field, qtag) pairs\n", want, length(model))
+    else
+        @warn "No saved model curves; run scripts/plot_neutron_parameter_sets.jl first" path=mp
+    end
+end
 
 qtags = sort(unique(String[k[4] for k in keys(scans)]))
 fields = sort(unique(Float64[k[3] for k in keys(scans)]))
@@ -79,24 +132,32 @@ Single nonnegative scale putting the low-Ei scan on the high-Ei intensity scale,
 the overlapping energy range above `emin`. Different flux and detector coverage mean the two
 are not absolutely comparable; this makes SHAPES comparable and nothing more.
 """
-function relative_scale(lo, hi; emin=0.35)
+function relative_scale(lo, hi; emin=0.35, wins=nothing)
     yl = SV.sv_interp1(lo.energy_meV, lo.intensity, hi.energy_meV)
-    ok = isfinite.(yl) .& isfinite.(hi.intensity) .& (hi.energy_meV .>= emin)
+    inwin = wins === nothing ? (hi.energy_meV .>= emin) :
+            reduce((a, b) -> a .| b,
+                   [(hi.energy_meV .>= w[1]) .& (hi.energy_meV .<= w[2]) for w in wins])
+    ok = isfinite.(yl) .& isfinite.(hi.intensity) .& inwin
     count(ok) < 5 && return 1.0
     num = dot(yl[ok], hi.intensity[ok]); den = dot(yl[ok], yl[ok])
     return (isfinite(den) && den > 0) ? max(0.0, num / den) : 1.0
 end
 
-fig = Figure(size = (560 * length(both) + 60, 340 * length(fields) + 110))
-Label(fig[0, 1:length(both)],
-      "YbZn2GaO5 -- RAW 1D scans at two incident energies. Sample signal must appear at the " *
-      "same energy in both; instrumental background need not.";
+# "raw" compares only qtags present at BOTH energies, which is the whole point of that
+# figure. "full" shows every qtag, because (0,1,0) still has a 0 T background probe.
+cols_q = MODE == "full" ? qtags : both
+
+fig = Figure(size = (560 * length(cols_q) + 60, 340 * length(fields) + 130))
+Label(fig[0, 1:length(cols_q)],
+      MODE == "full" ?
+      "YbZn2GaO5 -- 1D scans: raw at both incident energies, the subtracted background, the corrected data, and the best-fit model" :
+      "YbZn2GaO5 -- RAW 1D scans at two incident energies. Sample signal must appear at the same energy in both; instrumental background need not.";
       fontsize = 16, font = :bold)
 
 anchor_lo = Float64.(get(controls["kpm"], "min_bg_low_window_meV", [0.0, 0.75]))
 anchor_hi = Float64(get(controls["kpm"], "min_bg_high_threshold_meV", 2.5))
 
-for (row, B) in enumerate(fields), (col, q) in enumerate(both)
+for (row, B) in enumerate(fields), (col, q) in enumerate(cols_q)
     hi = get(scans, (EI_HI, TBASE, B, q), nothing)
     lo = get(scans, (EI_LO, TBASE, B, q), nothing)
     (hi === nothing && lo === nothing) && continue
@@ -111,7 +172,17 @@ for (row, B) in enumerate(fields), (col, q) in enumerate(both)
     vspan!(ax, anchor_hi, 4.2; color = (:seagreen, 0.13))
     vspan!(ax, anchor_lo[2], anchor_hi; color = (:indianred, 0.09))
 
-    s = (hi !== nothing && lo !== nothing) ? relative_scale(lo, hi) : 1.0
+    # In "full" mode anchor the relative normalisation on the windows where the background
+    # construction has real data, and NOT across the interpolated gap. Then the difference
+    # between the two datasets inside the gap is readable as background rather than being
+    # partly absorbed into the scale.
+    s = if hi !== nothing && lo !== nothing
+        MODE == "full" ?
+            relative_scale(lo, hi; wins=[(0.35, anchor_lo[2]), (anchor_hi, 2.9)]) :
+            relative_scale(lo, hi)
+    else
+        1.0
+    end
     if hi !== nothing
         errorbars!(ax, hi.energy_meV, hi.intensity, hi.error; color = (:black, 0.3),
                    whiskerwidth = 3)
@@ -135,6 +206,33 @@ for (row, B) in enumerate(fields), (col, q) in enumerate(both)
                linestyle = :dash, label = @sprintf("20 K, Ei = %.2f (x%.3g)", EI_LO, sh))
     end
 
+    if MODE == "full"
+        c = get(corrected, (B, q), nothing)
+        if c !== nothing
+            # intensity = raw_intensity - background, all on one scale.
+            lines!(ax, c.energy_meV, c.background; color = :darkorange, linewidth = 2.2,
+                   linestyle = :dashdot, label = "background subtracted")
+            errorbars!(ax, c.energy_meV, c.intensity, c.error; color = (:seagreen, 0.35),
+                       whiskerwidth = 3)
+            scatter!(ax, c.energy_meV, c.intensity; color = :seagreen, markersize = 6,
+                     marker = :diamond, label = "corrected (Ei = 4.65)")
+        end
+        mk = get(model, (B, q), nothing)
+        mk === nothing || lines!(ax, mk[1], mk[2]; color = :crimson, linewidth = 2.6,
+                                 label = "best-fit model")
+        # Raw difference between the two datasets: a first, UNCORRECTED estimate of the
+        # Ei = 4.65 magnet background. Resolution is NOT matched -- Ei = 3.32 is sharper --
+        # so this over/under-shoots wherever the sample signal is steep. It is the starting
+        # point for "healing" the gap, not the answer.
+        if hi !== nothing && lo !== nothing
+            yl = SV.sv_interp1(lo.energy_meV, lo.intensity, hi.energy_meV)
+            d = hi.intensity .- s .* yl
+            ok = isfinite.(d) .& (hi.energy_meV .>= 0.35) .& (hi.energy_meV .<= 2.95)
+            lines!(ax, hi.energy_meV[ok], d[ok]; color = :purple, linewidth = 1.8,
+                   linestyle = :dot, label = "4.65 - 3.32 (resolution NOT matched)")
+        end
+    end
+
     vals = Float64[]
     hi === nothing || append!(vals, filter(isfinite, hi.intensity[hi.energy_meV .>= 0.35]))
     lo === nothing || append!(vals, filter(isfinite, s .* lo.intensity[lo.energy_meV .>= 0.35]))
@@ -143,7 +241,7 @@ for (row, B) in enumerate(fields), (col, q) in enumerate(both)
     row == 1 && col == 1 && axislegend(ax; position = :rt, labelsize = 10)
 end
 
-Label(fig[length(fields) + 1, 1:length(both)],
+Label(fig[length(fields) + 1, 1:length(cols_q)],
       "Green = the two windows where the background is ANCHORED on min-over-fields data. " *
       "Red = the gap it PCHIP-interpolates across, about 70% of the [0.5, 3.0] meV fit " *
       "window, and where the magnet feature sits. Relative normalisation between the two Ei " *
@@ -152,6 +250,8 @@ Label(fig[length(fields) + 1, 1:length(both)],
       "there.";
       fontsize = 10, color = :grey30)
 
-out = joinpath(FDIR, "neutron_1d_two_incident_energies.png")
+out = joinpath(FDIR, MODE == "full" ?
+    "neutron_1d_two_Ei_with_model_and_background.png" :
+    "neutron_1d_two_incident_energies.png")
 save(out, fig; px_per_unit = 2)
 println("wrote $out")
