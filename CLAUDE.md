@@ -254,6 +254,12 @@ own scaling knee has not been measured.
 
 ## Gotchas
 
+- **`@printf`/`@sprintf` need a LITERAL format string.** `@printf("a" * "b", x)` fails with
+  "First argument ... must be a format string", and it fails at MACRO EXPANSION during load,
+  so it survives `Meta.parseall` and dies only when the script runs -- after the compute. This
+  has cost three separate cycles here, one of them 950 s of KPM. Wrap long formats by putting
+  the ARGUMENTS on continuation lines, never by concatenating the format itself.
+
 - **Do NOT run KPM under `julia -t auto` on a many-core box.** Intra-process q-threading
   loses efficiency fast, and past a knee it goes *negative*. Measured intra-process
   efficiency (one 81-q spectrum, 36x36x1):

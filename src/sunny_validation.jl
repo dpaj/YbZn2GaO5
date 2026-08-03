@@ -2892,6 +2892,152 @@ function _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol, r
 end
 
 """
+    _sv_kpm_fill_with_escalation!(I0, sys, controls, qs, energies, kernel, tol, reg,
+                                  nchunks, nE, nq; cache, section) -> (seconds, reg_used)
+
+Fill `I0` with KPM intensity, raising `regularization` on exactly the
+"Not an energy-minimum" abort and returning the value that finally worked.
+
+Disorder puts magnon modes at essentially zero energy (measured down to ~1e-4 meV), so
+Sunny's default regularization of 1e-8 leaves the BdG matrix not positive definite and KPM
+aborts. That is NOT a relaxation failure -- four different relaxation protocols converge to
+an identical E/site and all four are rejected, while raising regularization fixes every one.
+Stronger disorder pushes modes lower still, so a fixed value eventually fails again
+(1e-6 covers sigma_J to ~0.75 at 12x12x1 but not 1.0; at 36x36x1 it covers 1.0, so the
+threshold is cell-size dependent). Escalating on that specific error beats pre-emptively
+choosing a large value, because regularization biases low-energy spectral weight.
+
+Shared by the 1D and 2D paths so the two cannot drift apart. They previously HAD drifted:
+the 2D path constructed `SpinWaveTheoryKPM` without passing `regularization` at all, so
+`[kpm].regularization` was silently ignored there and Sunny's 1e-8 used regardless.
+"""
+function _sv_kpm_fill_with_escalation!(I0, sys, controls::Dict, qs, energies, kernel, tol,
+        reg, nchunks, nE, nq; cache=nothing, section::AbstractString="kpm")
+    kc = controls[section]
+    attempts = Int(get(kc, "regularization_attempts", 4))
+    growth = Float64(get(kc, "regularization_growth", 10.0))
+    seconds = 0.0
+    reg_used = Float64(reg)
+    for attempt in 1:max(1, attempts)
+        try
+            seconds += @elapsed _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies,
+                                    kernel, tol, reg_used, nchunks, nE, nq; cache)
+            break
+        catch err
+            msg = sprint(showerror, err)
+            if occursin("energy-minimum", msg) && attempt < attempts
+                reg_used *= growth
+                continue
+            end
+            rethrow()
+        end
+    end
+    return (seconds, reg_used)
+end
+
+"""
+    sv_kpm_2d_spectrum_from_context(ctx, controls, scan, k2; kwargs...)
+
+Intensity on the native KPM energy grid for one experimental **2D** scan, using a prebuilt
+context. The 2D analogue of `sv_kpm_spectrum_from_context`, and it exists to replace
+`sv_kpm_component_spectra_for_qs`, which had drifted badly from the 1D path:
+
+| | legacy 2D | this |
+|---|---|---|
+| initial state | `randomize_spins!` | field-polarized, via `sv_kpm_context` |
+| `regularization` | **never passed** (Sunny's 1e-8) | from config, with escalation |
+| q threading | none | `sv_kpm_q_chunks` |
+| KPM operator reuse | rebuilt per call | pooled on the context |
+| realizations | one, implicitly | caller's choice |
+
+The random start is the more serious of the two defects: in a disordered system at partial
+saturation it lands in an arbitrary local minimum, so the 2D map was not reproducible and
+not the same state the 1D cuts were computed from.
+
+Returns intensity as `nE x n_path`, already q-averaged over each displayed pixel's cloud
+with the sampler's weights, and with the magnetic form factor applied per q BEFORE
+averaging, matching the legacy ordering.
+"""
+function sv_kpm_2d_spectrum_from_context(ctx, controls::Dict, scan, k2;
+        leg::Integer=1, section::AbstractString="kpm", threaded::Bool=true,
+        regularization::Union{Nothing,Real}=nothing)
+    kc = controls[section]
+    sys = ctx.sys
+    sampler = sv_kpm_2d_q_sampler_from_scan(scan, k2; leg=leg)
+    qs = sampler.qs_flat
+    nq = length(qs)
+    energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]);
+                             length=Int(kc["n_energy"])))
+    kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
+    tol = Float64(kc["tol"])
+    reg = regularization === nothing ? Float64(get(kc, "regularization", 1e-6)) :
+                                       Float64(regularization)
+    nE = length(energies)
+    nchunks = threaded ? sv_kpm_q_chunks(controls, nq; section) : 1
+    I0 = Matrix{Float64}(undef, nE, nq)
+    seconds, reg = _sv_kpm_fill_with_escalation!(I0, sys, controls, qs, energies, kernel,
+                        tol, reg, nchunks, nE, nq;
+                        cache=get(ctx, :swt_cache, nothing), section)
+    Ipost, ffw, ffa, qmag = sv_apply_form_factor_to_intensity(I0, qs, controls)
+    Iavg = sv_average_qsampled_intensity_sampler(Ipost, sampler)
+    return (; energy_meV=energies, intensity=Iavg, intensity_qsampled=Ipost,
+              q_average=sampler, qs_center=sampler.qs_center,
+              n_q_evaluated=nq, n_chunks=nchunks, seconds, regularization=reg,
+              form_factor_weight=ffw, form_factor_amplitude=ffa, qmag_Ainv=qmag)
+end
+
+"""
+    sv_neutron_2d_curves(params, controls, scans, k2; kwargs...)
+
+Model 2D maps for every field in `scans`, averaged over `realizations` with common random
+numbers, on the native KPM energy grid. One context per (field, realization), so relaxation
+is paid once and the pooled KPM operators are reused across the escalation attempts.
+
+Returns a `Dict` from field to the averaged `nE x n_path` matrix, plus the energy grid,
+per-context diagnostics and the regularization actually used -- the same reporting the 1D
+objective grew after a scan silently mixed regularization values across parameter points.
+"""
+function sv_neutron_2d_curves(params, controls::Dict, scans::Dict, k2;
+        realizations=0:0, leg::Integer=1, section::AbstractString="kpm",
+        threaded::Bool=true, initial_spin_state::Symbol=:field_polarized,
+        maxiters::Union{Nothing,Int}=nothing, relax_attempts::Integer=1,
+        component::Symbol=:dispersive, verbose::Bool=false)
+    rs = collect(realizations)
+    fields = sort(collect(keys(scans)))
+    acc = Dict{Float64,Matrix{Float64}}()
+    energies = Float64[]
+    ctx_info = NamedTuple[]
+    reg_used = Float64[]
+    total_kpm = 0.0
+    for r in rs
+        for B in fields
+            ctx = sv_kpm_context(params, controls; component, field_T=B, realization=r,
+                                 section, initial_spin_state, maxiters, relax_attempts)
+            push!(ctx_info, (; field_T=B, realization=r, E_per_site=ctx.E_per_site,
+                               minimize_seconds=ctx.minimize_seconds,
+                               converged=ctx.converged, maxiters=ctx.maxiters))
+            sp = sv_kpm_2d_spectrum_from_context(ctx, controls, scans[B], k2;
+                     leg, section, threaded)
+            isempty(energies) && (energies = sp.energy_meV)
+            total_kpm += sp.seconds
+            push!(reg_used, sp.regularization)
+            haskey(acc, B) ? (acc[B] .+= sp.intensity) : (acc[B] = copy(sp.intensity))
+            verbose && @printf("    2d B=%5.2f r=%d  %d q in %d chunks, %.1f s  E/site=%.8f\n",
+                               B, r, sp.n_q_evaluated, sp.n_chunks, sp.seconds, ctx.E_per_site)
+        end
+    end
+    for B in keys(acc)
+        acc[B] ./= length(rs)
+    end
+    regs = sort(unique(reg_used))
+    length(regs) > 1 && @warn "Regularization was escalated during this 2D evaluation, so fields/realizations within it were computed at DIFFERENT regularization. Pin [kpm].regularization high enough for the whole range before comparing." values=regs
+    return (; curves=acc, energy_meV=energies, n_realizations=length(rs),
+              contexts=ctx_info, kpm_seconds=total_kpm, regularization_values=regs,
+              regularization_escalated=length(regs) > 1,
+              all_converged=all(c -> c.converged, ctx_info))
+end
+
+"""
     sv_kpm_spectrum_from_context(ctx, controls, cut; kwargs...)
 
 Intensity on the native KPM energy grid for one experimental cut, using a prebuilt
@@ -2930,25 +3076,9 @@ function sv_kpm_spectrum_from_context(ctx, controls::Dict, cut::SVNeutronCut1D;
     # fails again (1e-6 covers sigma_J up to ~0.75 at 12x12x1 but not 1.0). Escalate
     # on exactly that error rather than pre-emptively using a large value, since
     # regularization biases low-energy spectral weight.
-    seconds = 0.0
-    attempts = Int(get(kc, "regularization_attempts", 4))
-    growth = Float64(get(kc, "regularization_growth", 10.0))
-    reg_used = reg
-    for attempt in 1:max(1, attempts)
-        try
-            seconds += @elapsed _sv_kpm_fill_intensity!(I0, sys, controls, qs, energies, kernel, tol,
-                                    reg_used, nchunks, nE, nq; cache=get(ctx, :swt_cache, nothing))
-            break
-        catch err
-            msg = sprint(showerror, err)
-            if occursin("energy-minimum", msg) && attempt < attempts
-                reg_used *= growth
-                continue
-            end
-            rethrow()
-        end
-    end
-    reg = reg_used
+    seconds, reg = _sv_kpm_fill_with_escalation!(I0, sys, controls, qs, energies, kernel,
+                        tol, reg, nchunks, nE, nq;
+                        cache=get(ctx, :swt_cache, nothing), section)
 
 
     Ipost, ffw, ffa, qmag = sv_apply_form_factor_to_intensity(I0, qs, controls)

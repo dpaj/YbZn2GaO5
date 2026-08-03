@@ -1,0 +1,64 @@
+# Side-by-side 2D data-vs-model comparison along the CNCS path, for named parameter sets.
+# A forward comparison at parameters chosen elsewhere -- NOT a fit.
+#
+#   julia -t auto --project=. scripts/plot_neutron_2d_parameter_sets.jl
+#
+# Cost, from the data dimensions: the Ei = 4.65 meV leg-1 scans are 67 path points x 80
+# energies, and each displayed pixel evaluates n_path(3) x n_h(3) x n_k(3) x n_l(1) = 27 q,
+# so 1809 q per field and 3618 q for both. Energies are nearly free because KPM gets the
+# whole spectrum from one set of Chebyshev moments. Threaded, that is ~12 min per
+# realization for both fields.
+
+[paths]
+base_controls_toml = "configs/sunny_validation_controls.toml"
+figure_subdir = "results/figures/sunny_validation/neutron_2d_parameter_sets"
+table_subdir = "results/feature_tables/sunny_validation/neutron_2d_parameter_sets"
+
+[run]
+n_realizations = 2
+minimize_maxiters = 1000
+relax_attempts = 1
+
+[run.param_overrides]
+J2_meV = 0.01
+
+# The six-cut best known point. See CLAUDE.md: both disorder widths land on the by-eye
+# values while J1 and gzz are lower, which is expected since those two were inherited from
+# the analytical model that cannot represent mode mixing between exchange environments.
+[[sets]]
+name = "fitted"
+J1_meV = 0.15
+sigma_J = 0.50
+gzz = 3.50
+sigma_gzz = 0.80
+
+# Control: identical exchange and g magnitudes, all disorder OFF. On the 1D cuts this gives
+# a resolution-limited magnon against measured peaks 5-10x broader, and chi2_red 378.7
+# against 24.1. On a 2D map it should show as a thin dispersing line where the data show a
+# broad band. One realization, since with no disorder every realization is identical.
+[[sets]]
+name = "clean"
+J1_meV = 0.15
+sigma_J = 0.0
+gzz = 3.50
+sigma_gzz = 0.0
+n_realizations = 1
+
+[control_overrides.common]
+field_direction = [0.0, 0.0, 1.0]
+spin_S = 0.5
+seed = 20260611
+
+[control_overrides.kpm]
+system_size = [36, 36, 1]
+dims = [3, 3, 1]
+repeat_factor = [12, 12, 1]
+maxiters = 1000
+# Pinned, and now actually honoured on the 2D path -- the legacy route built
+# SpinWaveTheoryKPM without passing regularization at all, so this key was silently ignored
+# there and Sunny's 1e-8 default was used regardless.
+regularization = 1e-5
+# tol = 0.05 carries ~10% rms error against tol = 0.005. That is acceptable for a colormap
+# and not for ranking parameter points; this figure does no ranking. It is also 2.6/3.4 the
+# cost of the 0.02 used by the 1D fitting work.
+tol = 0.05
