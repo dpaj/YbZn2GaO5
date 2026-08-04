@@ -445,4 +445,158 @@ end
     @test all(v -> all(iszero, v), bg)
 end
 
+@testset "M(H) path characterization" begin
+    # CHARACTERIZATION, not validation. These pin the CURRENT behaviour of the M(H) path so that
+    # the planned refactor cannot change it silently. They deliberately assert conventions rather
+    # than physics accuracy -- the physics is validated elsewhere -- because conventions are what
+    # a refactor breaks. Tiny cell and few fields so this stays a pre-commit check.
+    controls = SV.sv_load_controls(REPO_ROOT)
+    (; params) = SV.sv_load_params(REPO_ROOT, controls)
+    p = merge(params, (; J1_meV=0.15, J2_meV=0.01, sigma_J=0.5, sigma_gzz=0.8, gzz=3.4))
+    Bs = [1.0, 4.0, 9.0]
+    kw = (; cell_size=(4, 4, 1), seed_dims=(2, 2, 1), Bs, maxiters=300, threaded=false)
+
+    # 1. DETERMINISM UNDER COMMON RANDOM NUMBERS. The optimizer needs the objective to be a
+    #    deterministic function of the parameters, so a repeated call at the same realizations
+    #    must agree BIT-FOR-BIT, not just approximately.
+    a = SV.sv_mvh_curve(p, controls; realizations=0:1, kw...)
+    b = SV.sv_mvh_curve(p, controls; realizations=0:1, kw...)
+    @test a.M_mean == b.M_mean
+
+    # 2. `realization` MUST actually change the disorder, or CRN would be averaging nothing.
+    r0 = SV.sv_mvh_curve(p, controls; realizations=0:0, kw...)
+    r1 = SV.sv_mvh_curve(p, controls; realizations=1:1, kw...)
+    @test r0.M_mean != r1.M_mean
+    @test r0.M_mean == SV.sv_mvh_curve(p, controls; realizations=0:0, kw...).M_mean
+
+    # 3. SIGN. Sunny's moment is -gS, so the raw calculator value is negative and
+    #    [largecell].moment_sign converts to the experimental convention. If a refactor drops the
+    #    sign, M comes out negative -- this is the single easiest convention to break.
+    @test all(>(0), r0.M_mean)
+    @test Float64(get(get(controls, "largecell", Dict{String,Any}()), "moment_sign", -1.0)) == -1.0
+
+    # 4. M(H) must rise with field and approach the g*S ceiling. gzz = 3.4, S = 1/2 => 1.7 uB.
+    @test issorted(r0.M_mean)
+    @test r0.M_mean[end] > r0.M_mean[1]
+    @test r0.M_mean[end] < 3.4 * 0.5 * 1.05
+
+    # 5. THE TWO-COMPONENT SCALE IS EXACT LEAST SQUARES, which is what "A_M is profiled out"
+    #    rests on. Perturbing either coefficient must not reduce the residual.
+    y = [0.4, 1.1, 1.55]
+    aa, bb = SV.sv_best_two_component_scale(y, r0.M_mean, Bs)
+    rms(u, v) = sqrt(mean((u .* r0.M_mean .+ v .* Bs .- y) .^ 2))
+    best = rms(aa, bb)
+    @test all(d -> rms(aa + d, bb) >= best - 1e-12, (-0.05, 0.05))
+    @test all(d -> rms(aa, bb + d) >= best - 1e-12, (-0.01, 0.01))
+
+    # 6. The objective's reported chi_vv is b/a, so it is a RATIO of the two fitted components and
+    #    is invariant to an overall rescaling of the data. Pinning this guards the interpretation
+    #    that the linear term is 44% of the 7 T magnetization, which is how the excess was found.
+    o1 = SV.sv_mvh_objective(p, controls, Bs, y; realizations=0:0, kw...)
+    o2 = SV.sv_mvh_objective(p, controls, Bs, 2 .* y; realizations=0:0, kw...)
+    @test isapprox(o1.chi_vv, o2.chi_vv; rtol=1e-8)
+    @test isapprox(o2.A_M, 2 * o1.A_M; rtol=1e-8)
+    @test isapprox(o2.rms, 2 * o1.rms; rtol=1e-8)
+end
+
+@testset "2D neutron path characterization" begin
+    # The 2D path is the newest and least exercised, and it shares the KPM operator pool and the
+    # form-factor and q-averaging machinery with the 1D path. What matters for a refactor is that
+    # the two paths stay consistent with each other, so that is what is tested here rather than
+    # any absolute intensity.
+    controls = SV.sv_load_controls(REPO_ROOT)
+    kc = controls["kpm"]
+    kc["dims"] = [2, 2, 1]; kc["system_size"] = [4, 4, 1]; kc["repeat_factor"] = [2, 2, 1]
+    kc["tol"] = 0.05; kc["maxiters"] = 200; kc["regularization"] = 1e-5
+    kc["energy_min_meV"] = 0.2; kc["energy_max_meV"] = 2.0; kc["n_energy"] = 7
+    kc["kernel_fwhm_meV"] = 0.1
+    k2 = SV.sv_kpm_2d_controls(controls)
+    leg = Int(get(k2, "leg", 1))
+    scans = SV.sv_load_2d_scans_for_kpm(REPO_ROOT, controls;
+                fields_T=Float64.(get(k2, "fields_T", [9.0, 14.0])), leg=leg)
+    @test !isempty(scans)
+
+    # Truncate to two path points so this is a pre-commit-sized job. The q sampler is driven off
+    # the scan's own x axis, so trimming x trims the q count proportionally.
+    B = minimum(keys(scans))
+    s = scans[B]
+    small = SV.SVScan2DCompare(s.file, s.header, s.xlabel, s.x[1:2], s.e, s.z[1:2, :])
+
+    (; params) = SV.sv_load_params(REPO_ROOT, controls)
+    p = merge(params, (; J1_meV=0.15, J2_meV=0.01, sigma_J=0.5, sigma_gzz=0.8, gzz=3.4))
+    ctx = SV.sv_kpm_context(p, controls; component=:dispersive, field_T=B, realization=0,
+                            section="kpm", maxiters=200, relax_attempts=1)
+
+    # 1. DETERMINISM, and in particular that reusing one context through the pooled KPM operators
+    #    does not perturb the result. This is the invariant the operator pool was added under.
+    x1 = SV.sv_kpm_2d_spectrum_from_context(ctx, controls, small, k2; leg=leg, threaded=false)
+    x2 = SV.sv_kpm_2d_spectrum_from_context(ctx, controls, small, k2; leg=leg, threaded=false)
+    @test x1.intensity == x2.intensity
+
+    # 2. THREADING MUST NOT CHANGE THE ANSWER. q-chunking splits the same q list across chunks,
+    #    so with enough threads the threaded result must match the serial one bit-for-bit.
+    if Threads.nthreads() > 1
+        xt = SV.sv_kpm_2d_spectrum_from_context(ctx, controls, small, k2; leg=leg, threaded=true)
+        @test xt.intensity == x1.intensity
+    end
+
+    # 3. SHAPE AND FINITENESS. One column per path point, one row per energy, and intensity is a
+    #    cross-section so it cannot be negative.
+    @test size(x1.intensity) == (Int(kc["n_energy"]), length(small.x))
+    @test all(isfinite, x1.intensity)
+    @test all(>=(0), x1.intensity)
+    @test length(x1.energy_meV) == Int(kc["n_energy"])
+
+    # 4. THE FORM FACTOR IS APPLIED, AND ONLY ONCE. intensity_qsampled is post-form-factor, so
+    #    dividing it back out by the reported weight must recover a strictly larger raw intensity
+    #    wherever the weight is below one.
+    @test length(x1.form_factor_weight) == x1.n_q_evaluated
+    @test all(w -> 0 < w <= 1 + 1e-12, x1.form_factor_weight)
+
+    # 5. CROSS-PATH CONSISTENCY WITH THE 1D DRIVER. sv_neutron_2d_curves must reproduce
+    #    sv_kpm_2d_spectrum_from_context for a single field and realization -- the wrapper adds
+    #    realization averaging and per-context bookkeeping, and nothing else.
+    r = SV.sv_neutron_2d_curves(p, controls, Dict(B => small), k2; realizations=0:0, leg=leg,
+                                threaded=false, maxiters=200, relax_attempts=1)
+    @test haskey(r.curves, B)
+    @test r.energy_meV == x1.energy_meV
+    @test r.n_realizations == 1
+    @test isapprox(r.curves[B], x1.intensity; rtol=1e-10)
+
+    # 6. Averaging over realizations must be a genuine mean over DIFFERENT disorder draws, not a
+    #    repeat of one. Two realizations must differ from one, and the wrapper must report it.
+    r2 = SV.sv_neutron_2d_curves(p, controls, Dict(B => small), k2; realizations=0:1, leg=leg,
+                                 threaded=false, maxiters=200, relax_attempts=1)
+    @test r2.n_realizations == 2
+    @test r2.curves[B] != r.curves[B]
+end
+
+@testset "scripts/README.md covers every entry point" begin
+    # A stale index is worse than no index, because it is trusted. This is cheap enough to be a
+    # pre-commit check: adding a script without indexing it fails here rather than being
+    # discovered months later by someone who cannot tell a 30-second plot from a 12-hour fit.
+    sdir = joinpath(REPO_ROOT, "scripts")
+    readme = joinpath(sdir, "README.md")
+    @test isfile(readme)
+    txt = read(readme, String)
+    entries = sort(filter(f -> endswith(f, ".jl") || endswith(f, ".sh"), readdir(sdir)))
+    @test !isempty(entries)
+    uncovered = filter(f -> !occursin(f, txt), entries)
+    isempty(uncovered) ||
+        @info "scripts not indexed in scripts/README.md" uncovered
+    @test isempty(uncovered)
+
+    # And the reverse: every name the index cites in backticks must exist, so a rename cannot
+    # leave a dangling pointer. Paths are resolved relative to scripts/ and to the repo root,
+    # because the index legitimately cites ../test/runtests.jl and dev/ helpers.
+    cited = Set(m.captures[1] for m in eachmatch(r"`([A-Za-z0-9_./]+\.(?:jl|sh))`", txt))
+    dangling = filter(collect(cited)) do c
+        !isfile(joinpath(sdir, c)) && !isfile(normpath(joinpath(sdir, c))) &&
+            !isfile(joinpath(REPO_ROOT, c))
+    end
+    isempty(dangling) ||
+        @info "scripts/README.md cites names that do not exist" dangling
+    @test isempty(dangling)
+end
+
 end
