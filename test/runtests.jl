@@ -388,4 +388,61 @@ end
     @test isnothing(get(ctx2, :swt_cache, nothing))
 end
 
+@testset "background variance is optional and defaults off" begin
+    # The neutron objective weights by 1/sigma^2 from COUNTING statistics alone, so a well-counted
+    # point in a badly-known background region carries full weight. The optional background term
+    # fixes that -- but it MUST default off, because every chi2 quoted in this repo and the
+    # cross-machine baseline of 27.047850 were computed without it. If the default path changed,
+    # nothing either machine has exchanged would remain comparable.
+    controls = SV.sv_load_controls(REPO_ROOT)
+    controls["kpm"]["system_size"] = [12, 12, 1]
+    controls["kpm"]["dims"] = [3, 3, 1]
+    controls["kpm"]["repeat_factor"] = [4, 4, 1]
+    controls["kpm"]["maxiters"] = 500
+    controls["kpm"]["regularization"] = 1e-5
+    controls["kpm"]["tol"] = 0.05
+    controls["kpm"]["experimental_histogram"]["mode"] = "analytical_cut_volume_grid"
+    controls["kpm"]["experimental_histogram"]["n_measured_h"] = 2
+    controls["kpm"]["experimental_histogram"]["n_measured_k"] = 2
+    controls["kpm"]["experimental_histogram"]["n_measured_l"] = 1
+    controls["kpm"]["q_averaging"]["n_h"] = 2
+    controls["kpm"]["q_averaging"]["n_k"] = 2
+    controls["kpm"]["q_averaging"]["n_l"] = 1
+    (; params) = SV.sv_load_params(REPO_ROOT, controls)
+    params = merge(params, (; J1_meV=0.15, J2_meV=0.01, sigma_J=0.5, gzz=3.5, sigma_gzz=0.8))
+    cuts = filter(c -> c.qtag == "0p33_0p33_0",
+                  SV.sv_load_kpm_experimental_cuts(REPO_ROOT, controls))
+    @test !isempty(cuts)
+
+    base = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                   maxiters=500, relax_attempts=1)
+    @test base.background_variance_used == false
+    @test base.background_variance_inflation == 1.0
+
+    # An explicit all-zero background sigma must reproduce the default BIT-FOR-BIT. This is the
+    # invariant that guarantees turning the feature on with no information changes nothing.
+    zeros_bg = [zeros(Float64, length(c.energy_meV)) for c in cuts]
+    z = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                maxiters=500, relax_attempts=1, background_sigma=zeros_bg)
+    @test z.background_variance_used == true
+    @test z.chi2_red == base.chi2_red
+    @test isapprox(z.background_variance_inflation, 1.0; atol=1e-12)
+
+    # A nonzero background sigma must LOWER chi2 (weights shrink) and raise the reported
+    # inflation. Using each cut's own error scale keeps the test independent of absolute units.
+    big_bg = [copy(c.error) for c in cuts]          # sigma_bg = sigma_count => variance doubles
+    b = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                maxiters=500, relax_attempts=1, background_sigma=big_bg)
+    @test b.chi2_red < base.chi2_red
+    @test isapprox(b.background_variance_inflation, 2.0; rtol=1e-6)
+    @test isapprox(b.chi2_red, base.chi2_red / 2; rtol=1e-6)
+
+    # The loader must return one vector per cut, matched to that cut's grid, and must degrade to
+    # zeros rather than erroring when the table is absent.
+    bg = SV.sv_load_background_sigma(REPO_ROOT, cuts; path="does/not/exist.csv")
+    @test length(bg) == length(cuts)
+    @test all(k -> length(bg[k]) == length(cuts[k].energy_meV), eachindex(cuts))
+    @test all(v -> all(iszero, v), bg)
+end
+
 end

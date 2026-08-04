@@ -3234,6 +3234,71 @@ function sv_neutron_weighted_scale(cuts::AbstractVector, model::AbstractVector;
 end
 
 """
+    sv_load_background_sigma(repo_root, cuts; path=nothing) -> Vector{Vector{Float64}}
+
+Per-point background uncertainty for each cut, aligned to that cut's own energy grid, read from
+the envelope table written by `scripts/background_stage1_ei465.jl`.
+
+WHY THIS EXISTS. `sv_neutron_objective` weights by `1/sigma^2` with `sigma` from COUNTING
+statistics alone, so a well-counted point sitting in a badly-known background region carries full
+weight while a poorly-counted point in a well-known region carries little. That is backwards
+relative to what is actually known, and it has a measured consequence: on the two 9 T dispersive
+cuts, 35-41% of `chi2` comes from the 1.8-2.4 meV band where their modes are NOT, i.e. from the
+2.08 meV magnet background, and that is the mechanism that pulled `gzz` toward 3.70.
+
+The values come from an envelope over 36 defensible background constructions -- three low window
+edges, three high edges, two interpolation forms, and crucially TWO FAMILIES that bracket whether
+the 2.08 meV feature is modelled at all. That last axis dominates: on the dispersive cuts it is
+3.5-5x the window-placement spread, reaching 180-201% of the background value at 2.08 meV. Varying
+window edges alone would have understated the uncertainty by more than tenfold with every variant
+wrong in the same direction.
+
+Returns zeros for any cut absent from the table, so a partial table degrades to "no extra
+variance" rather than to an error.
+"""
+function sv_load_background_sigma(repo_root::AbstractString, cuts::AbstractVector;
+        path::Union{Nothing,AbstractString}=nothing)
+    rel = path === nothing ?
+        "results/feature_tables/sunny_validation/background_stage1_ei465/ei4p65_background_envelope.csv" :
+        path
+    full = sv_repo_path(repo_root, rel)
+    out = [zeros(Float64, length(c.energy_meV)) for c in cuts]
+    if !isfile(full)
+        @warn "No background envelope table; proceeding with counting statistics only. Run scripts/background_stage1_ei465.jl to generate it." path=full
+        return out
+    end
+    lines = filter(!isempty, strip.(readlines(full)))
+    hdr = String.(split(lines[1], ','))
+    ix = Dict(h => i for (i, h) in enumerate(hdr))
+    for req in ("qtag", "field_T", "energy_meV", "bg_sigma")
+        haskey(ix, req) || error("Background envelope table is missing column '$req': $full")
+    end
+    # (qtag, field) => energy => sigma
+    tbl = Dict{Tuple{String,Float64},Dict{Float64,Float64}}()
+    for l in lines[2:end]
+        f = String.(split(l, ','))
+        length(f) == length(hdr) || continue
+        B = tryparse(Float64, f[ix["field_T"]]); E = tryparse(Float64, f[ix["energy_meV"]])
+        S = tryparse(Float64, f[ix["bg_sigma"]])
+        (B === nothing || E === nothing) && continue
+        d = get!(Dict{Float64,Float64}, tbl, (f[ix["qtag"]], B))
+        d[E] = (S === nothing || !isfinite(S)) ? 0.0 : max(0.0, S)
+    end
+    for (k, c) in enumerate(cuts)
+        d = get(tbl, (c.qtag, round(c.field_T; digits=1)), nothing)
+        d === nothing && continue
+        Es = sort(collect(keys(d)))
+        for (i, E) in enumerate(c.energy_meV)
+            # Nearest tabulated energy; the table is on the cut's own grid, so this is exact
+            # in normal use and degrades gracefully if a grid ever changes.
+            j = argmin(abs.(Es .- E))
+            abs(Es[j] - E) < 0.05 && (out[k][i] = d[Es[j]])
+        end
+    end
+    return out
+end
+
+"""
     sv_neutron_objective(params, controls, cuts; kwargs...)
 
 Residual of the KPM model against the background-subtracted 1D cuts, with one global
@@ -3245,7 +3310,8 @@ The `tol` truncation error sets the floor on what any of this can resolve: at
 far below that are not meaningful.
 """
 function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
-        window=nothing, use_errors::Bool=true, kwargs...)
+        window=nothing, use_errors::Bool=true,
+        background_sigma::Union{Nothing,AbstractVector}=nothing, kwargs...)
     kc = controls["kpm"]
     win = window === nothing ?
         Tuple(Float64.(get(kc, "neutron_scale_fit_window_meV", [0.5, 3.0]))) : window
@@ -3254,7 +3320,7 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
 
     per_cut = NamedTuple[]
     chi2 = 0.0; ndof = 0; ss = 0.0; nn = 0
-    for (c, m) in zip(cuts, r.curves)
+    for (ci, (c, m)) in enumerate(zip(cuts, r.curves))
         c2 = 0.0; n2 = 0; s2 = 0.0
         for i in eachindex(c.energy_meV)
             E = c.energy_meV[i]
@@ -3262,7 +3328,15 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
             y, x, e = c.intensity[i], scale * m[i], c.error[i]
             (isfinite(y) && isfinite(x)) || continue
             d = x - y
-            w = use_errors && isfinite(e) && e > 0 ? 1 / e^2 : 1.0
+            # Background uncertainty adds in quadrature with counting statistics. DEFAULTS OFF:
+            # passing `background_sigma = nothing` reproduces every chi2 in this repo bit-for-bit,
+            # which is what makes the with/without comparison interpretable rather than a silent
+            # redefinition of every number.
+            bs = background_sigma === nothing ? 0.0 :
+                 (ci <= length(background_sigma) && i <= length(background_sigma[ci]) ?
+                  background_sigma[ci][i] : 0.0)
+            var = (use_errors && isfinite(e) && e > 0 ? e^2 : 1.0) + bs^2
+            w = 1 / var
             c2 += w * d^2; s2 += d^2; n2 += 1
         end
         push!(per_cut, (; field_T=c.field_T, qtag=c.qtag, n=n2,
@@ -3277,7 +3351,27 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
     if r.regularization_escalated
         @warn "Regularization was escalated during this evaluation, so cuts within it were computed at DIFFERENT regularization. Pin [kpm].regularization high enough for the whole parameter range before comparing across parameters." values = r.regularization_values maxlog = 3
     end
+    # Median variance inflation inside the fit window, so a caller can see how much the
+    # background term is actually doing rather than having to infer it.
+    infl = 1.0
+    if background_sigma !== nothing
+        ratios = Float64[]
+        for (ci, c) in enumerate(cuts)
+            ci <= length(background_sigma) || continue
+            for i in eachindex(c.energy_meV)
+                E = c.energy_meV[i]
+                (E >= win[1] && E <= win[2]) || continue
+                e = c.error[i]
+                (isfinite(e) && e > 0) || continue
+                i <= length(background_sigma[ci]) || continue
+                push!(ratios, (e^2 + background_sigma[ci][i]^2) / e^2)
+            end
+        end
+        isempty(ratios) || (infl = median(ratios))
+    end
     return (; chi2_red = !ok ? Inf : (ndof > 0 ? chi2 / ndof : NaN),
+              background_variance_used = background_sigma !== nothing,
+              background_variance_inflation = infl,
               rms = !ok ? Inf : (nn > 0 ? sqrt(ss / nn) : NaN),
               chi2_red_raw = ndof > 0 ? chi2 / ndof : NaN,
               scale, per_cut, window=win, n_points=nn, ok,
