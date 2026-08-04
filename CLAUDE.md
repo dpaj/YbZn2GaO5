@@ -98,7 +98,8 @@ configs/   TOML run controls, one per script; deep-merged onto a base config
 data/      experimental inputs (tracked; data/raw and data/generated are ignored)
 docs/      the real documentation - see the reading order below
 results/   generated figures and tables — GITIGNORED, all regenerable
-scripts/   runnable entry points; scripts/dev holds benchmarks; scripts/legacy the old co-fit
+scripts/   runnable entry points — START AT scripts/README.md, which indexes all 46 by
+           purpose with a cost tag; scripts/dev holds benchmarks, scripts/legacy the old co-fit
 src/       sunny_validation.jl (large), feature_extraction.jl, parameters.jl
 test/      runtests.jl — physics-invariant regression tests (see Housekeeping)
 ```
@@ -188,6 +189,43 @@ Consequences that should govern priorities here:
   kinematically accessible. Note that `(0,1,0)` is NOT accessible at that Ei, so the one cut
   with no structured-residual correction is also the one that cannot be cross-checked.
 
+### The background uncertainty is now propagated, but OFF BY DEFAULT
+
+`sv_neutron_objective` weights by `1/sigma^2` from **counting statistics alone**, so a
+well-counted point in a badly-known background region carries full weight while a poorly-counted
+point in a well-known region carries little — backwards relative to what is actually known. That
+has a measured consequence: on the two 9 T dispersive cuts, **35–41% of `chi2` comes from the
+1.8–2.4 meV band where their modes are not**, i.e. from the 2.08 meV magnet background, and that
+is the mechanism that pulled `gzz` toward 3.70.
+
+`scripts/background_stage1_ei465.jl` builds the background under **36 defensible choices** and
+writes an envelope table; `sv_load_background_sigma` reads it; and `sv_neutron_objective` takes an
+optional `background_sigma` that adds in quadrature with the counting error.
+
+The design decision that matters: varying window edges and interpolation form **alone** would have
+produced a small band in which *every member was wrong the same way*, because they all smooth
+across the 2.08 meV feature. So the family also brackets whether the feature is modelled at all —
+**smooth** (leaves it in, hence under-subtracts, a lower bound) versus **min-fed** (over-subtracts,
+an upper bound). That axis dominates exactly where it should:
+
+| qtag | envelope at 2.08 meV | window-only | family gap / window spread |
+|---|---|---|---|
+| `(0,1,0)` | ±1.4e-4 (19%) | 1.4e-4 | **1.0x — the families COINCIDE** |
+| `(0.33,0.33,0)` | ±7.6e-4 (201%) | 5.8e-5 | 5.0x |
+| `(0.5,0,0)` | ±7.7e-4 (180%) | 6.9e-5 | 3.5x |
+
+So window-edges-only would have understated the uncertainty **more than tenfold** on the
+dispersive cuts. And `(0,1,0)`'s two families coinciding is **independent third confirmation** that
+it carries no 2.08 meV feature — after the 0 T scan and the two-incident-energy comparison — so the
+clean `gzz` determination stands.
+
+**It defaults off, and `nothing` reproduces every `chi2` in this repo bit-for-bit.** That is
+deliberate: the cross-machine target `chi2_red = 27.047850` is unchanged to six decimals after the
+change, so every number the two machines have exchanged stays comparable, and a with/without
+comparison is interpretable rather than a silent redefinition. Turning it on inflates the in-window
+variance by a median of **5.2x**. The objective reports `background_variance_used` and
+`background_variance_inflation` so a caller can see how much the term is doing.
+
 ## Magnetization data: the observables, and one trap that cost a year
 
 `data/magnetization/` and `data/ac_susceptibility/` now hold primary measurements. All
@@ -198,7 +236,7 @@ neutron crystal, so cross-comparison between them is legitimate.
 |---|---|---|---|---|
 | `mpms3_0p4K/` | MPMS3 + He-3 insert | 0.42-0.50 K | 7 T | B \|\| c, 12.2 mg |
 | `ppms_2p5K/` | DynaCool VSM | 2.5 K | 14 T | B \|\| c (4.81 mg), B ⟂ c (7.7 mg) |
-| `ac_susceptibility/nhmfl/` | SCM1, dilution | ~29 mK | 18 T | both, 48 scans |
+| `ac_susceptibility/nhmfl/` | SCM1, dilution | 20 mK and 450 mK | 18 T | **B \|\| c only** — see below |
 
 ### THE MPMS3 CENTRING TRAP — read before reducing any MPMS3 file
 
@@ -233,6 +271,58 @@ curve sat *below* 2.5 K at every field, which no paramagnet can do.
 `data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv` is **superseded** — it was
 digitized from a figure *and* came from the wrong column. It reproduces
 `DC Moment Fixed Ctr` to 4 decimal places.
+
+### THE AC SUSCEPTIBILITY DATASET — read the run log before the column names
+
+The AC data were meant to be the sharpest test of the central claim: the published model wants
+field-induced ordered phases with a magnetisation **plateau**, a plateau is a **dip toward zero
+in dM/dH**, and AC susceptibility measures `chi' = dM/dH` *directly* at 20 mK to 18 T — past
+both the 14 T DC data and the 14 T neutron measurements, cold enough that thermal rounding
+cannot hide a feature, and scale-free, so having no absolute units costs nothing.
+
+**The column names are COIL POSITIONS, not samples.** The probe carried three coils and the
+mapping is only in `SCM1_July2025.xlsx`:
+
+| coil | contents |
+|---|---|
+| `T3` | **YbZn2GaO5, "para" = B \|\| c — OURS, and the only one** |
+| `T1` | LuCu(OH)Br — a *different compound*, another group sharing the probe |
+| `B1` | **not listed in the log**, yet carries the largest signal (6x T3) |
+
+So **there is no perpendicular AC measurement.** The first analysis here assumed `B1` was the
+perpendicular crystal; that was wrong and self-refuting, because `B1` goes **negative** above
+~12.4 T, which no sample susceptibility can do, and its phase rotates 79° over 0–12 T where
+`T3`'s moves 4°.
+
+Two more traps. **Only 991 Hz drives**, so `x2`/`x3`/`y2`/`y3` are noise at 1e-9, three orders
+down — use `x1`,`y1`, and prefer the magnitude, which is free of the phase convention. And **the
+log's milliamp figures are heater currents, not fields**, so runs that look like repeats are not:
+015/016 are at **20 mK**, 047/048 at **450–500 mK**.
+
+**The dataset cannot currently give `chi'`.** `T3`'s magnitude is flat from ~1 to ~10 T and
+reaches ~40% at 18 T, while the DC dM/dH falls to ~5% of its 1 T value by 10 T — a factor ~8
+disagreement, and temperature cannot explain it, since cooling *sharpens* a saturation rather
+than flattening one. Both candidate background models fail:
+
+- **constant complex coil offset** — subtracting the full 18 T value leaves 6.77e-7 at 2 T
+  against 6.63e-7 at 8 T, so the flat region survives untouched;
+- **differencing 20 mK against 450 mK**, which should cancel anything depending on coil and
+  magnet but not on the spin state — the residual instead *grows* to 7.8e-8 V by 14–18 T,
+  largest exactly where the sample is most saturated, and changes sign below 2 T.
+
+The DC side of the contradiction is far better characterised — absolute units, two instruments,
+two crystals, agreement with the published SI to four digits — so **this is not evidence against
+the DC data.**
+
+**What survives is weaker than intended but real.** A smooth background cannot create or cancel
+a *sharp* feature, so the absence of any dip, step, spike or up/down hysteresis anywhere in
+0–18 T does bound first-order transitions and plateau edges. In both sweep pairs the minimum of
+`chi'` above 2 T sits at the **18 T endpoint** — no interior dip.
+
+**Three things are needed from the experiment, not from analysis**: an empty-coil run at matching
+field and temperature, the coil constants, and an account of what coil `B1` held. Until then,
+treat AC as a sharp-feature bound only. See `scripts/plot_ac_susceptibility_plateau_test.jl` and
+`data/ac_susceptibility/nhmfl/PROVENANCE.md`.
 
 ## Established results — do not re-derive
 
@@ -453,7 +543,13 @@ own scaling knee has not been measured.
    at high disorder? M(H) no longer does.
 5. Where does the excess linear M(H) term come from, if not Van Vleck? Suspect the
    normalization of the digitized data, an impurity, or model error.
-6. **Co-fit the background with the model refinement.** Noted deliberately, NOT pursued yet.
+6. **AC susceptibility needs three things from the experiment before it can constrain anything.**
+   An empty-coil run at matching field and temperature, the coil constants, and an account of what
+   coil `B1` held. Until then the dataset supports only a *sharp-feature* bound, because both
+   candidate background models fail — see the AC section above. This is a request to the
+   collaborators, not an analysis task, and it is the cheapest outstanding way to add a genuinely
+   independent 18 T observable.
+7. **Co-fit the background with the model refinement.** Noted deliberately, NOT pursued yet.
    The background is currently constructed first and frozen, then the model is fitted to the
    corrected data -- so background error propagates into parameters with no route back. Fitting
    a parameterised background jointly with the exchange and g parameters would let the data
@@ -462,13 +558,13 @@ own scaling knee has not been measured.
    would need tight physical priors (the A1-A4 assumptions in
    `scripts/background_stage1_ei332.jl`) and a demonstration that it does not simply eat the
    magnon. Worth doing after the per-point variance route is exhausted, not before.
-7. **Non-Gaussian disorder distributions.** If quantitative agreement keeps failing, the
+8. **Non-Gaussian disorder distributions.** If quantitative agreement keeps failing, the
    next thing to try is a non-Gaussian distribution of `gzz` and/or `J`, NOT more XXZ.
    There is a physical reason to expect this: Zn/Ga site mixing gives each magnetic site a
    *discrete* count of Ga vs Zn neighbours, so the natural distribution is multinomial over
    local environments -- multi-modal, not a smooth Gaussian. A Gaussian is the convenient
    parameterisation, not the physically motivated one. Deliberately deferred, not dismissed.
-8. Zero field. The published claim is a zero-field statement and everything here is
+9. Zero field. The published claim is a zero-field statement and everything here is
    field-polarized. Hard: no polarized reference state, LSWT invalid, and classical
    statistics is a poor approximation at the 0.07 K neutron temperature.
 
@@ -582,6 +678,20 @@ testset asserts once per file in `configs/`, and the KPM-threading testset
 self-skips without threads (contributing two assertions with `-t auto`, zero
 without). So the number moves whenever a config is added or an assertion is written,
 and it differs between machines and between threaded and unthreaded runs — observed
-values include 53, 54, 55, 56 and 57, all correct. **Judge it by "all green, 0
-failures".** Runtime is machine-dependent too (about 20 s on the Windows box, 34 s
-on the DGX), so it is not a regression signal either.
+values include 53, 54, 55, 56, 57, 131 and 163, all correct. **Judge it by "all green, 0
+failures".** Runtime is machine-dependent too, so it is not a regression signal either; it is now
+about **2 min** on the Windows box, up from ~20 s, because the suite grew characterization tests
+that actually run the M(H) and 2D KPM paths.
+
+Two of the testsets are **characterization tests, not validation** — they pin the *current*
+behaviour of the M(H) and 2D paths so the planned refactor cannot change it silently. They assert
+conventions rather than physics accuracy, because conventions are what a refactor breaks: the
+`moment_sign = -1.0` sign flip, bit-for-bit determinism under common random numbers, `realization`
+genuinely changing the disorder, `sv_best_two_component_scale` being exact least squares (which is
+what "`A_M` is profiled out" rests on), threaded q-chunking matching serial bit-for-bit, and
+`sv_neutron_2d_curves` reproducing `sv_kpm_2d_spectrum_from_context` exactly for one field and one
+realization. If a refactor breaks one of these, it has changed the physics.
+
+A further testset keeps `scripts/README.md` honest in both directions — every top-level script must
+be indexed, and every name the index cites must exist. **Adding a script without indexing it is a
+test failure.** A stale index is worse than no index, because it is trusted.
