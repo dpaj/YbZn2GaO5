@@ -1,64 +1,59 @@
-# AC susceptibility vs field, dilution-fridge temperatures, NHMFL (Tallahassee)
+# NHMFL SCM1 AC susceptibility, July/August 2025
 
-**Put the raw scan files and the Excel run log here, unrenamed.** The spreadsheet can stay as
-`.xlsx` -- `openpyxl` and `pandas` are both available, so no CSV export is needed.
+48 sweeps from the SCM1 dilution-refrigerator insert at the NHMFL, plus the run log
+`SCM1_July2025.xlsx`. Raw instrument text, tab-separated, one file per sweep.
 
-The run log contains YZGO in both **B || c** and **B perpendicular to c**, and also an unrelated
-**Lu-containing compound which is to be ignored**. Recording which is which here means nobody has
-to re-derive that mapping from the spreadsheet later.
+## READ THE RUN LOG BEFORE THE COLUMN NAMES
 
-## What is actually measured, and why it matters
+The probe carried **three pickup coils and only one held our sample.** The column names
+(`B1x1`, `T1x1`, `T3x1`, ...) name coil positions, not samples, and the mapping is only in
+the xlsx:
 
-**The measured quantity is dM/dH, not M.** M is a *derived* quantity obtained by integrating, so:
+| coil | contents |
+|---|---|
+| `T3` | **YbZn2GaO5, "para" = B ∥ c — OURS, and the only one** |
+| `T1` | LuCu(OH)Br — a *different compound*, another group sharing the probe |
+| `B1` | **not listed in the log**, yet carries the largest signal (6x T3) |
 
-- the field derivative is the primary, least-processed observable and should be compared directly
-  against the model's dM/dH rather than against an integrated M;
-- integration introduces an arbitrary constant and accumulates any low-field artefact across the
-  whole range, so an integrated M inherits errors that the raw derivative does not;
-- **there are no absolute units on the magnetisation.** Only shapes are comparable, with a free
-  scale -- which is already how every neutron and M(H) comparison in this repo works, so it costs
-  nothing.
+So **there is no perpendicular AC measurement in this dataset.** An early analysis here
+assumed `B1` was the perpendicular crystal. That was wrong, and self-refuting: `B1`'s
+in-phase channel crosses zero and goes negative above ~12.4 T, which no sample
+susceptibility can do, and its phase rotates 79 degrees over 0-12 T where `T3`'s moves 4.
 
-## Why this dataset may be the sharpest test of the central claim
+## Lock-ins
 
-A magnetisation **plateau appears in dM/dH as a dip toward zero**, and a field-induced transition
-as a step or a spike. The published model requires structured non-k=0 phases with a clear plateau,
-and this dataset is field-swept dM/dH at **dilution temperature and high field** -- exactly the
-regime where those features are predicted.
+Three SR830s at 991, 313 and 137 Hz, but **only 991 Hz drives** in the field sweeps, so the
+`x2`/`x3`/`y2`/`y3` columns are noise at 1e-9 -- three orders below signal. Use `x1`,`y1`
+only, and prefer the magnitude `sqrt(x^2+y^2)`, which is free of the lock-in phase
+convention. Frequencies rotate between runs; the log records which.
 
-A plateau is a **scale-free shape feature**, so the absence of units does not weaken this use at
-all, and the higher field range is a genuine advantage over the 14 T PPMS data. This complements
-the high-field neutron diffraction (which sees only k = 0) on the same question from an independent
-probe.
+## Temperature
 
-So the primary intended use is **testing for the absence of the predicted phases**, not refining
-parameters. Whether it becomes a fit input is a later and separate decision -- the artefacts and
-missing units argue for using it as a qualitative discriminator first.
+`Tmc` is the mixing-chamber thermometer and is the one to use. **The run log's milliamp
+figures are heater currents, not fields**, so runs that look like repeats are not:
 
-## Metadata needed here
+| runs | sweep | Tmc |
+|---|---|---|
+| 015 / 016 | 0 to 18 T / 18 to 0 T | **20 mK** |
+| 047 / 048 | 0 to 18 T / 18 to 0 T | **450-500 mK** (048 drifts to 0.60 K) |
 
-- [ ] **Run-to-file mapping**: which scan files are YZGO B || c, which are YZGO B perp c, and which
-      belong to the Lu compound and should be skipped. (The spreadsheet has this; recording the
-      conclusion here avoids re-deriving it.)
-- [ ] **Temperature(s)** of each scan, and whether thermometry is reliable under a field sweep at
-      dilution temperatures.
-- [ ] **Field range and sweep rate**, and whether up and down sweeps are both present -- sweep-rate
-      dependence and hysteresis are worth knowing about separately from physics.
-- [ ] **Whether the files contain raw dM/dH, an already-integrated M, or both.**
-- [ ] **Known artefacts** to expect and their field locations, since the point of the dataset is
-      finding shape features and an artefact would masquerade as one. This is the same hazard the
-      Ei = 4.65 magnet background created for the neutron cuts.
-- [ ] **Sample identity / mass** if known, and whether these are the same crystals as the PPMS and
-      neutron measurements. All crystals so far come from the same Haidong Zhou group growth (Aya
-      Rutherford), the same growth as the neutron crystal, so cross-comparison is legitimate.
+## What this dataset can and cannot support
 
-## Comparison note
+**Cannot: chi' itself.** `T3`'s magnitude is flat from ~1 to ~10 T and falls to ~40% at 18 T,
+while the DC dM/dH falls to ~5% of its 1 T value by 10 T -- a factor ~8 disagreement, in the
+wrong direction for temperature to explain, since cooling sharpens a saturation rather than
+flattening one. Two background models were tried and both fail: a constant complex coil
+offset leaves the flat region intact (6.77e-7 at 2 T vs 6.63e-7 at 8 T), and differencing
+the 20 mK and 450 mK runs gives a residual that *grows* to 7.8e-8 V at 14-18 T, largest
+exactly where the sample is most saturated.
 
-The model side needs dM/dH, which is a numerical derivative of a computed M(H). At dilution
-temperatures the T = 0 minimiser is the right tool (classical statistics is *worse* than assuming
-T = 0 in the quantum limit -- see the note in `../../magnetization/ppms_2p5K/PROVENANCE.md`), so
-`sv_mvh_curve` applies directly and no finite-temperature path is needed here. That makes this
-cheaper to model than the 2.5 K data, not more expensive.
+**Can: bound sharp features.** A smooth instrumental background cannot create or cancel a
+sharp feature, so the absence of any dip, step, spike or up/down hysteresis anywhere in
+0-18 T does bound first-order transitions and magnetisation-plateau edges. In both sweep
+pairs the minimum of chi' above 2 T sits at the 18 T endpoint -- there is no interior dip.
 
-A fine field grid is required, since differentiating a coarsely sampled M(H) will smear exactly the
-features being looked for.
+**To make it quantitative, three things are needed from the experiment**, not from analysis:
+an empty-coil run at matching field and temperature, the coil constants, and an account of
+what coil `B1` held.
+
+Analysis: `scripts/plot_ac_susceptibility_plateau_test.jl`.
