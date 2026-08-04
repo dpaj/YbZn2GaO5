@@ -2675,7 +2675,13 @@ function sv_kpm_component_spectrum(params, controls::Dict; component::Symbol, fi
 
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
-    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=Float64(kc["tol"]))
+    # regularization MUST be forwarded. Omitting it silently falls back to Sunny's 1e-8,
+    # which is too small to keep the BdG matrix positive definite once disorder puts modes
+    # near zero energy -- the "Not an energy-minimum" abort. Found by an audit after the
+    # same omission turned up in two GPU scripts and the legacy 2D path.
+    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls),
+                            tol=Float64(kc["tol"]),
+                            regularization=Float64(get(kc, "regularization", 1e-6)))
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
 
@@ -4066,7 +4072,13 @@ function sv_kpm_component_spectra_for_qs(params, controls::Dict; component::Symb
 
     energies = collect(range(Float64(kc["energy_min_meV"]), Float64(kc["energy_max_meV"]); length=Int(kc["n_energy"])))
     kernel = gaussian(fwhm=Float64(kc["kernel_fwhm_meV"]))
-    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls), tol=Float64(kc["tol"]))
+    # regularization MUST be forwarded. Omitting it silently falls back to Sunny's 1e-8,
+    # which is too small to keep the BdG matrix positive definite once disorder puts modes
+    # near zero energy -- the "Not an energy-minimum" abort. Found by an audit after the
+    # same omission turned up in two GPU scripts and the legacy 2D path.
+    swt = SpinWaveTheoryKPM(sys; measure=sv_sunny_measure(sys, controls),
+                            tol=Float64(kc["tol"]),
+                            regularization=Float64(get(kc, "regularization", 1e-6)))
     res = intensities(swt, qs; energies, kernel)
     raw = sv_try_extract_sunny_intensity(res)
     I0 = sv_orient_sunny_intensity_matrix(raw, length(energies), length(qs))

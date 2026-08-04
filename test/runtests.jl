@@ -252,12 +252,14 @@ end
         rng = MersenneTwister(11)
         qs = [[0.5 + 0.05randn(rng), 0.05randn(rng), 0.0] for _ in 1:8]
 
-        ser = intensities(SpinWaveTheoryKPM(sys; measure=meas(), tol=0.05), qs;
+        ser = intensities(SpinWaveTheoryKPM(sys; measure=meas(), tol=0.05,
+                                            regularization=1e-5), qs;
                           energies, kernel=kern).data
         halves = [qs[1:2:end], qs[2:2:end]]
         outs = Vector{Any}(undef, 2)
         Threads.@threads for i in 1:2
-            outs[i] = intensities(SpinWaveTheoryKPM(sys; measure=meas(), tol=0.05),
+            outs[i] = intensities(SpinWaveTheoryKPM(sys; measure=meas(), tol=0.05,
+                                                   regularization=1e-5),
                                   halves[i]; energies, kernel=kern).data
         end
         @test Array(outs[1]) == Array(ser)[:, 1:2:end]
