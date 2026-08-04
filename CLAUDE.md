@@ -409,6 +409,15 @@ held by vLLM** (~0.7 GiB free) and 0-3 are usable; CPU q-threading reaches 16.6x
 
 Measured on the DGX at 36x36x1, 81 q, tol 0.05, kernel 0.05 meV:
 
+**Caveat on every figure in this table and the 3x/16.6x threading numbers above:** they were
+measured with `regularization` at Sunny's 1e-8 default, not the production 1e-5, because the
+benchmark scripts omitted the keyword (`benchmark_kpm_1d_scaling.jl`,
+`benchmark_sunny_kpm_core.jl`, `benchmark_sunny_kpm_cpu_gpu_compare.jl`). Regularization changes
+the spectral range and hence the Chebyshev moment count, so these are correct measurements of a
+*non-production* configuration. Treat them as relative comparisons between paths, not as absolute
+production costs. The production per-evaluation cost, measured properly, is **466 s for a six-cut
+objective at 81 q with 8 realizations on 32 DGX threads**.
+
 | path | s per q |
 |---|---|
 | CPU serial | 0.774 |

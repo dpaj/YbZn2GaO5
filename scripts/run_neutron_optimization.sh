@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Launch the multi-start neutron optimization, then the follow-up analysis.
 #
-#   nohup scripts/run_neutron_optimization_weekend.sh > results/logs/weekend.log 2>&1 &
+#   nohup scripts/run_neutron_optimization.sh > results/logs/fit.log 2>&1 &
+#
+# Renamed from run_neutron_optimization_weekend.sh: with the measured budget it is a
+# ~16 h overnight job at 4 chains x 100 evaluations, not a weekend one.
 #
 # One process per Nelder-Mead start at 4 threads each. Intra-process q-threading is only
 # ~73% efficient at 4 threads on this box and saturates near 3.4x at 32, so N processes x 4
@@ -19,8 +22,19 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p results/logs
 
-N=${YZGO_N_STARTS:-8}
-T=${YZGO_THREADS_PER_START:-4}
+# Defaults are the LATENCY optimum, which is what a sequential optimizer needs: Nelder-Mead
+# cannot be parallelised internally, so per-chain wall time is set by latency, and the DGX
+# measured 32 threads as the minimum (818 s at 225 q, against 1773 s at 8 threads and 875 s at
+# 64). Four concurrent chains cost only 24% per-chain latency, so 4 starts come for 1.24x the
+# price of one.
+#
+# These deliberately REPLACE an earlier 8 x 4 default, which was the THROUGHPUT optimum. The two
+# optimise different quantities and 8 x 4 was simply the wrong one for this optimizer.
+#
+# On a 128-core box use the defaults. On a 32-core box, 1 x 32 gives one start at minimum
+# latency; more chains there trade latency for starts and do worse on both.
+N=${YZGO_N_STARTS:-4}
+T=${YZGO_THREADS_PER_START:-32}
 
 echo "=== $(date) launching $N starts at $T threads each ($((N * T)) total) ==="
 julia --version
