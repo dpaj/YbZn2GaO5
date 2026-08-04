@@ -566,13 +566,60 @@ The **measured** axis is the constraint; extra resolution nodes buy nothing. Tha
 exactly what Gauss-Hermite predicts, since 3 nodes are already exact for the Gaussian's
 second moment.
 
-**Production setting: 5x5 measured x 3x3 Gauss-Hermite resolution = 225 q.** It reaches
-0.058% of the 625-q answer at 1.79x the cost of 81 q (sub-linear in q because threading
-is more efficient at larger q). Note this SUPERSEDES an earlier conclusion here that
-81 q was converged to 0.05% -- that was measured against the legacy 5.9%-narrow kernel,
-and the fix reopened the question: post-fix, 81 q is 0.64% off and the grid's
-convergence advantage over MC disappears. 0.64% is still far below the 12-15%
-realization floor, so 81 q is *usable*; it is not *converged*.
+**Production setting: 3x3 measured x 3x3 Gauss-Hermite resolution = 81 q.**
+
+The convergence ranking is 225 q (0.058% of the 625-q answer) ahead of 81 q (0.64%), and
+an earlier version of this section recommended 225 q on that basis. That was convergence
+for its own sake. The experimental systematic floor is far above both: roughly 70% of the
+`[0.5, 3.0]` meV fit window rests on PCHIP-interpolated background (see CLAUDE.md, "The
+data, and how far to trust it"), and the disorder-realization floor is 12-15%. Measured
+directly at n = 8: 81 q gives chi2_red 27.0479 against 26.7616 at 225 q, a difference of
+0.286 -- well below the ~1.0 chi2_red realization scatter at that n. The two settings are
+indistinguishable to the fit, and 81 q costs 1.76x less (466 s against 818 s per six-cut
+evaluation). Use 81 q.
+
+`tol` sensitivity closes the same way and more strongly: chi2_red is identical to six
+decimals across tol = 0.05 / 0.02 / 0.01, and the DIFFERENCE between two dissimilar
+parameter points (gzz 3.40 against 3.80) is identical to six decimals as well
+(-0.386301 at both 0.05 and 0.01). Since a fit consumes only differences, tol = 0.05 is
+exact for fitting purposes at 1.85x less cost than 0.01.
+
+### Per-evaluation budget for the neutron fit (DGX, 2026-08-04)
+
+One full six-cut `sv_neutron_objective` evaluation, 8 realizations under common random
+numbers, 81 q, tol 0.05, regularization 1e-5, maxiters 1000, relax_attempts 1,
+36x36x1. Post KPM-operator caching. Uncontended unless noted.
+
+Latency against thread count (225 q, so comparable to the rows below it):
+
+| threads | wall | compute |
+|---------|------|---------|
+| 8  | 1773 s | 1721 s |
+| 16 | 1095 s | 1039 s |
+| **32** | **818 s** | 761 s |
+| 64 | 875 s | 820 s |
+
+**32 threads minimises latency.** Note this is a DIFFERENT optimum from the throughput
+table earlier in this file, which favours many processes at 4 threads. Both are correct:
+throughput and latency optimise differently, and which one matters depends on the
+optimiser. Nelder-Mead is sequential internally, so **latency sets fit wall time**.
+
+At the production 81 q, 32 threads: **466 s per evaluation** solo. Under 4-way
+concurrency (4 chains x 32 threads = 128 physical cores) it degrades only 24%, to 579 s
+per chain, with all four chains in flight:
+
+| configuration | wall per evaluation | starts explored |
+|---------------|--------------------|-----------------|
+| 1 chain  | 466 s | 1 |
+| 4 chains | 579 s | 4 |
+
+So **a 4-chain multi-start at 100 evaluations per chain is about 16 hours** -- four
+independent starts for 1.24x the cost of one, against 52 h if run sequentially. An
+overnight job rather than a weekend one.
+
+`chi2_red` came back identical to six decimals across every thread count (8/16/32/64),
+across 4-way concurrency, and across runs days apart. Under CRN the objective is
+bit-reproducible, which is the property a simplex method depends on.
 
 ### The disorder-realization floor is robust
 
