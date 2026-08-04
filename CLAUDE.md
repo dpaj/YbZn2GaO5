@@ -14,6 +14,34 @@ picture, refining site mixing at x = 0.60(5), y = 0.35(5) and explicitly
 anticipating a distribution of Lande g factors. The two camps disagree head-on
 about whether the crystal-field broadening is site mixing or CEF-phonon coupling.
 
+**Who the argument is with.** In this repository "published" means **Bag et al., the
+Haravifard group**. Work from the **Broholm group** identifying possible disorder in this
+system is **aligned with the argument here, not a target of it** -- do not lump the two
+together when writing anything up. (I have not verified which of the citations above maps to
+which group, so check before attributing.)
+
+### What is already robust, independent of the open caveats
+
+Worth keeping in view, because the day-to-day work is currently deep in background systematics
+and parameter precision, and neither of those threatens the thesis:
+
+1. **YZGO is not well described by the published Hamiltonian.** Established, not pending.
+2. **The field-saturated phase cannot be described by a single resolution-limited mode.**
+   Disorder broadening is *required*. The clean control at the same exchange and g magnitudes
+   gives a resolution-limited magnon against measured peaks 5-10x broader
+   (`chi2_red` 378.7 against 24.1 on the 1D cuts, a thin line against a broad band in 2D), and
+   the measured widths survive a move to the better-resolution Ei = 3.32 setting -- so the
+   broadening is inhomogeneous, not instrumental.
+3. **M(H) and the other observables follow the disorder model rather than the published one.**
+   No plateau where the published parameters demand one, high-field diffraction showing only
+   k = 0, non-Lorentzian magnon widths, and crystal field plus diffraction both requiring
+   disorder to fit at all.
+
+**These conclusions survive a systematic background bias and survive imprecision in the
+parameter values.** The background work and the parameter refinement improve the quantitative
+statement; they are not load-bearing for the qualitative one. Do not let a difficult background
+region or an unresolved gzz digit get reported as though the thesis were in doubt.
+
 Status: a minimal single-disordered-phase model reproduces M(H) semi-quantitatively
 (rms 0.004 uB against a 1.12 uB signal) and the 1D neutron cuts qualitatively.
 
@@ -81,6 +109,22 @@ papers. A clone will not have them.
 Reading order for the current work: `docs/largecell_mvh_classical.md`,
 `docs/crystal_field_van_vleck.md`, `docs/benchmarking.md`, then
 `docs/companion/` for the older analytical layer.
+
+## Working principle: never bury an assumption
+
+Where a choice has to be made and cannot be measured -- a window edge, an interpolation form, a
+weighting -- **make the choice explicit, run the defensible alternatives, and carry the spread
+forward as an uncertainty.** It usually costs little and it makes the assumption auditable
+instead of invisible.
+
+The corollary matters as much: an uncertainty band built by varying parameters *within* an
+assumption does NOT cover the assumption being wrong. Stage 1's 18-variant envelope spans window
+edges and interpolation form; it says nothing about whether "no known process peaks at 1.5 meV"
+is true. State that limit whenever the band is quoted.
+
+The failure mode this replaces is real and recurred several times here: fixing a bias by editing
+the objective, which trades a measured bias for an unmeasured one and hides the choice inside a
+number.
 
 ## Conventions that are easy to get wrong
 
@@ -306,14 +350,17 @@ own scaling knee has not been measured.
 
 ## Open threads
 
-1. **SETTLED - q sampling.** Use the deterministic grid at **5x5 measured x 3x3
-   Gauss-Hermite resolution = 225 q**, which converges to 0.058% against a 625-q reference at
-   1.79x the cost of 81 q. 81 q is usable but NOT converged (0.64%) now that the resolution
-   quadrature is correct. Extra *resolution* nodes buy nothing at all -- three Gauss-Hermite
-   nodes are already exact -- so the *measured* axis is the only one that matters. MC sampling
-   is not preferred: at 625 events it still carries ~0.5% sampling error, and while its
-   samples are frozen across evaluations (hence deterministic), they are irregular in
-   parameter space. All of this sits far below the systematic floor described above.
+1. **SETTLED - q sampling: use 81 q (3x3 measured x 3x3 Gauss-Hermite resolution).** The
+   deterministic grid, not MC. This REVERSES an earlier recommendation of 225 q here, which was
+   convergence for its own sake: 225 q is better converged (0.058% against 0.64% versus a 625-q
+   reference) but the two differ by only 0.286 in `chi2_red` at n = 8, well below the ~1.0
+   realization scatter and far below the background systematic, while costing 1.76x more. Extra
+   *resolution* nodes buy nothing at all -- three Gauss-Hermite nodes are already exact -- so the
+   *measured* axis is the only one that matters. MC is not preferred: at 625 events it still
+   carries ~0.5% sampling error, and while its samples are frozen across evaluations (hence
+   deterministic) they are irregular in parameter space. All of this sits far below the systematic
+   floor described above, which is the general lesson: check where the floor is before buying
+   numerical precision.
 2. **MOSTLY DONE - the neutron objective.** `sv_neutron_objective` exists, with realization
    averaging under common random numbers, q-threading, a profiled-out intensity scale,
    failure sentinels and per-cut reporting. What is still missing is an OPTIMIZER: the scans
@@ -326,13 +373,22 @@ own scaling knee has not been measured.
    at high disorder? M(H) no longer does.
 5. Where does the excess linear M(H) term come from, if not Van Vleck? Suspect the
    normalization of the digitized data, an impurity, or model error.
-6. **Non-Gaussian disorder distributions.** If quantitative agreement keeps failing, the
+6. **Co-fit the background with the model refinement.** Noted deliberately, NOT pursued yet.
+   The background is currently constructed first and frozen, then the model is fitted to the
+   corrected data -- so background error propagates into parameters with no route back. Fitting
+   a parameterised background jointly with the exchange and g parameters would let the data
+   constrain both, and would produce a proper covariance between them rather than a one-way
+   systematic. The obvious hazard is that a flexible background can absorb real signal, so it
+   would need tight physical priors (the A1-A4 assumptions in
+   `scripts/background_stage1_ei332.jl`) and a demonstration that it does not simply eat the
+   magnon. Worth doing after the per-point variance route is exhausted, not before.
+7. **Non-Gaussian disorder distributions.** If quantitative agreement keeps failing, the
    next thing to try is a non-Gaussian distribution of `gzz` and/or `J`, NOT more XXZ.
    There is a physical reason to expect this: Zn/Ga site mixing gives each magnetic site a
    *discrete* count of Ga vs Zn neighbours, so the natural distribution is multinomial over
    local environments -- multi-modal, not a smooth Gaussian. A Gaussian is the convenient
    parameterisation, not the physically motivated one. Deliberately deferred, not dismissed.
-7. Zero field. The published claim is a zero-field statement and everything here is
+8. Zero field. The published claim is a zero-field statement and everything here is
    field-polarized. Hard: no polarized reference state, LSWT invalid, and classical
    statistics is a poor approximation at the 0.07 K neutron temperature.
 

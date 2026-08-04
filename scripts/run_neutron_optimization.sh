@@ -16,7 +16,8 @@
 # start dying costs one start. The follow-up reads whatever best_*.csv exist, so it still
 # produces results if some starts failed.
 #
-# Env overrides: YZGO_N_STARTS, YZGO_THREADS_PER_START, YZGO_NEUTRON_OPT_CONTROLS.
+# Env overrides: YZGO_N_STARTS, YZGO_THREADS_PER_START, YZGO_ANALYSIS_THREADS,
+# YZGO_NEUTRON_OPT_CONTROLS.
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -61,6 +62,10 @@ echo "=== $(date) all starts done ($fail non-zero exits) ==="
 # The follow-up runs even if some starts failed: it reads whatever best_*.csv exist, and a
 # partial multi-start still yields a usable optimum plus profiles.
 echo "=== $(date) follow-up analysis ==="
-julia -t auto --project=. scripts/analyze_neutron_optimum.jl \
+# The follow-up does REAL KPM work (profile likelihood, seed validation), so -t auto is the
+# worst available choice: the measured latency optimum is 32 threads and 64 is already worse.
+# On a 256-thread box -t auto is badly wrong, and it contradicted this file's own advice.
+AT=${YZGO_ANALYSIS_THREADS:-32}
+julia -t "$AT" --project=. scripts/analyze_neutron_optimum.jl \
     > results/logs/opt_followup.log 2>&1
 echo "=== $(date) finished (follow-up exit $?) ==="
