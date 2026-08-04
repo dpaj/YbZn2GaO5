@@ -84,7 +84,8 @@ rest on. Run in order; Stage 1 for Ei = 4.65 is the production one.
 | `run_neutron_optimization.sh` | heavy | Launches N multi-start Nelder–Mead chains then the follow-up analysis. Defaults N=4, T=32 — **32 threads/chain minimizes latency**, which is what Nelder–Mead needs; more processes maximizes throughput but not convergence speed. |
 | `optimize_neutron_neldermead.jl` | heavy | One Nelder–Mead start. Run several concurrently rather than raising iterations. |
 | `analyze_neutron_optimum.jl` | medium | Follow-up once the chains finish. |
-| `check_background_variance_effect.jl` | heavy | Acceptance test for the background-variance term: per-cut gzz preference with the variance on vs off. A **validation of the UQ machinery**, not a parameter refinement. |
+| `check_background_variance_effect.jl` | heavy | Acceptance test for the background-variance term: per-cut gzz preference with the variance on vs off (~1 h). A **validation of the UQ machinery**, not a parameter refinement. It **failed its own prediction** — the 9 T dispersive cuts do not move — which is how we learned that a χ² *budget* does not tell you what drives a parameter. |
+| `plot_background_variance_effect.jl` | free | Plots the above from its CSV — no recompute. Read its header for the refuted-mechanism argument. |
 | `scan_gamma_first_parameters.jl` | heavy | Factorized "Γ-first" parameter scan. |
 | `plot_gamma_first_scan.jl` | free | Reads the scan CSV only — no recompute. |
 | `run_cofit_9T14T.jl` | heavy | The neutron + magnetization co-fit driver. |

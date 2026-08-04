@@ -194,9 +194,13 @@ Consequences that should govern priorities here:
 `sv_neutron_objective` weights by `1/sigma^2` from **counting statistics alone**, so a
 well-counted point in a badly-known background region carries full weight while a poorly-counted
 point in a well-known region carries little — backwards relative to what is actually known. That
-has a measured consequence: on the two 9 T dispersive cuts, **35–41% of `chi2` comes from the
-1.8–2.4 meV band where their modes are not**, i.e. from the 2.08 meV magnet background, and that
-is the mechanism that pulled `gzz` toward 3.70.
+has a measured consequence for the *size* of `chi2`: on the two 9 T dispersive cuts, **35–41% of
+`chi2` comes from the 1.8–2.4 meV band where their modes are not**, i.e. from the 2.08 meV magnet
+background.
+
+**It is NOT, however, what pulled `gzz` toward 3.70 — that inference was wrong, and the acceptance
+test refuted it directly.** See "the acceptance test failed its own prediction" below before
+repeating it.
 
 `scripts/background_stage1_ei465.jl` builds the background under **36 defensible choices** and
 writes an envelope table; `sv_load_background_sigma` reads it; and `sv_neutron_objective` takes an
@@ -225,6 +229,40 @@ change, so every number the two machines have exchanged stays comparable, and a 
 comparison is interpretable rather than a silent redefinition. Turning it on inflates the in-window
 variance by a median of **5.2x**. The objective reports `background_variance_used` and
 `background_variance_inflation` so a caller can see how much the term is doing.
+
+### The acceptance test failed its own prediction — and that is the useful result
+
+`scripts/check_background_variance_effect.jl` (~1 h) scanned `gzz` over 3.30–3.70 twice, variance
+off and on, reporting per-cut preferences. `scripts/plot_background_variance_effect.jl` plots it from
+the CSV. The prediction was that the two 9 T **dispersive** cuts would move off `gzz = 3.70` once
+the artefact band got large error bars. **They do not move at all.** Only the 14 T cuts shift, by
+−0.10 each, and the six-cut minimum stays at 3.60.
+
+It is not that the term is inert or mis-aimed. It is strongly selective and it does a lot to `chi2`:
+for `(0.33,0.33,0)` the envelope σ is 5.8e-4 at 2.02 meV against 5.0e-5 at 1.03 meV where its mode
+actually sits — **11.5x in σ, 133x in variance**, pointed at the artefact and away from the signal —
+and the six-cut `chi2_red` falls 19.74 → 5.58.
+
+**Why the minimum does not move.** Down-weighting the band scales each cut's whole `chi2(gzz)`
+*curve* down — level to 17–35%, curvature to 7–48% — rather than subtracting a `gzz`-dependent piece
+from it. A constant offset shifts no minimum, and a near-uniform scaling shifts none either.
+
+**The general lesson, worth more than the specific result: the `chi2` FRACTION sitting in a band does
+not tell you what drives a parameter.** What matters is that band's contribution to the *derivative*
+of `chi2` with respect to the parameter. By that measure the artefact band was never the driver, even
+though it dominated the `chi2` total. Do not infer a parameter bias from a `chi2` budget again
+without checking the derivative.
+
+**Consequence, and it cuts in our favour:** the dispersive cuts' preference for `gzz = 3.70` is
+**not** a background artefact. The tension with `(0,1,0)` is real and needs a different explanation —
+exchange anisotropy, a q-dependent systematic, or model error — and can no longer be blamed on the
+background.
+
+**Two limits on this run.** Three of the six per-cut minima sit at a **scan edge** (`(0,1,0)`@9T at
+3.30, both dispersive cuts at 3.70), so those preferred values are bounded, not determined; a wider
+scan is needed before quoting any of them. And with the variance on, `(0,1,0)`@14T is essentially
+flat (span 0.31 across the whole range), i.e. it stops constraining `gzz` — which is arguably
+**correct**, since its mode exits the 3.0 meV fit window in this range and it should not be voting.
 
 ## Magnetization data: the observables, and one trap that cost a year
 
