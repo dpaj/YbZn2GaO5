@@ -188,6 +188,52 @@ Consequences that should govern priorities here:
   kinematically accessible. Note that `(0,1,0)` is NOT accessible at that Ei, so the one cut
   with no structured-residual correction is also the one that cannot be cross-checked.
 
+## Magnetization data: the observables, and one trap that cost a year
+
+`data/magnetization/` and `data/ac_susceptibility/` now hold primary measurements. All
+crystals come from the **same Haidong Zhou group growth** (measured by Aya Rutherford) as the
+neutron crystal, so cross-comparison between them is legitimate.
+
+| directory | instrument | T | field | orientation |
+|---|---|---|---|---|
+| `mpms3_0p4K/` | MPMS3 + He-3 insert | 0.42-0.50 K | 7 T | B \|\| c, 12.2 mg |
+| `ppms_2p5K/` | DynaCool VSM | 2.5 K | 14 T | B \|\| c (4.81 mg), B ⟂ c (7.7 mg) |
+| `ac_susceptibility/nhmfl/` | SCM1, dilution | ~29 mK | 18 T | both, 48 scans |
+
+### THE MPMS3 CENTRING TRAP — read before reducing any MPMS3 file
+
+**Every absolute magnetization number in this repo before 2026-08-04 was 1.49x too low.** The
+cause is a data-reduction choice, not a measurement failure, and it does **not** affect any
+shape fit — `A_M` is profiled out and the error is a constant — but it invalidates any absolute
+value.
+
+`Moment (emu)` is **EMPTY** in the MPMS3 file. The moment lives in two other columns, from two
+different fits to the SQUID response:
+
+- `DC Moment Fixed Ctr` — sample centre held at the nominal position
+- `DC Moment Free Ctr` — centre floated as a fit parameter ← **USE THIS ONE**
+
+The sample sat **3.06 mm** off centre (nominal 39.686 mm, fitted 36.623 mm), so the fixed fit
+solved at the wrong position and under-read by **1.486 ± 0.004**. The file states its own
+verdict: `DC Fixed Fit` quality **0.268** against `DC Free Fit` **0.957**.
+
+Corrected, three independent numbers agree at ~7 T to four digits: MPMS3 0.42 K free centring
+**1.6512**, DynaCool VSM 2.5 K on a *different crystal* **1.6522**, Bag et al. Supplement
+**~1.65**.
+
+**SECOND TRAP IN THE SAME FILE.** `Temperature (K)` reads **1.56 K** — that is the MPMS3
+*chamber*. Sample temperature is in a column named **`He3 temp`**, reading 0.423-0.495 K. A
+reduction using `Temperature (K)` is wrong by a factor of four. (The 0.42 K the M(H) protocol
+has always assumed is correct.)
+
+The physics check that settles it, and which was visible all along: the corrected 0.42 K curve
+sits **above** 2.5 K at low field and converges by ~7 T where Zeeman ≫ kT. The old digitized
+curve sat *below* 2.5 K at every field, which no paramagnet can do.
+
+`data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv` is **superseded** — it was
+digitized from a figure *and* came from the wrong column. It reproduces
+`DC Moment Fixed Ctr` to 4 decimal places.
+
 ## Established results — do not re-derive
 
 - **M(H) constrains B_sat, not J1 and gzz separately.** With `A_M` profiled out,
@@ -282,8 +328,42 @@ Consequences that should govern priorities here:
   `J1 = 0.15` -- outside the grid on both axes. At the right parameters K/M sit at 12-50 and
   the Gamma-to-K/M gap is 2-3x, not 25x. **Do not revive the XXZ argument from a chi2
   surface without first checking that the grid contains the optimum.**
-- **The M(H) linear term is not Van Vleck.** The crystal field gives
-  `chi_VV^zz = 0.0171 +- 0.0007 uB/T`; the fit wants 0.0368, a factor 2.2 more.
+- **The M(H) linear term is not Van Vleck, and this is now settled three ways.** Our crystal
+  field gives `chi_VV^zz = 0.0171 +- 0.0007 uB/T`. The **Bag et al. Supplement independently
+  fits 1.39(2)e-2** for H ∥ c at 2.5 K — agreeing with our crystal field to ~25% by a wholly
+  different route. Both are **~13x below the 0.19 uB/T** our M(H) fit wanted, and forcing that
+  term to zero degraded rms from 0.0107 to 0.0652, so the fit leaned on it hard. The excess is
+  therefore neither Van Vleck nor a bad Van Vleck estimate: it is **our model's approach to
+  saturation being the wrong shape**, with the linear term patching it. Consistent with the
+  neutron optimum overshooting `B_sat` to ~3.3 T where M(H) wants ~4.0 T.
+- **We AGREE with the published work on the g factor, so the argument is not about g.** The Bag
+  et al. Supplement fits **g_par = 3.436(4)** at 2.5 K, which sits inside our clean neutron
+  determination (`gzz` ~ 3.40, Gamma surface 3.30-3.45). The disagreement is about the
+  **exchange** and about **disorder**, not about g. State it that way — it narrows the argument
+  to ground this work is strong on.
+- **Our sample reproduces theirs to 4.2%, identically in both orientations.** At 14 T and 2.5 K
+  our DynaCool VSM gives 1.84 (∥) and 1.59 (⟂) uB/Yb against the Supplement's ~1.92 and ~1.66 —
+  ratio 0.958 in *both*. A uniform offset across orientations is a normalization systematic
+  (mass, holder, demagnetization), not a sample difference. So the sample behind the erroneous
+  claim and ours show the same observables.
+- **The g tensor is nearly ISOTROPIC, which argues against putting all anisotropy in g.**
+  The Supplement fits **g_perp = 3.037(5)**, so `g_perp/g_par = 0.884`. Our own 2.5 K data then
+  point two ways: at 14 T `M_par/M_perp = 1.157` against `g_par/g_perp = 1.131` (consistent, so
+  high-field anisotropy *is* g anisotropy), but at 1 T `M_par/M_perp = 1.50` against the ~1.28
+  that `g^2` predicts (**not** consistent). Extra anisotropy appearing where correlations matter
+  and vanishing where the polarized state dominates is the signature of **exchange** anisotropy.
+  So some XXZ may be genuinely needed — on top of the disorder model, not instead of it.
+  Caveat: at 1 T and 2.5 K this is not linear response (`g mu_B B` ~ 0.20 meV vs
+  `kT` = 0.215 meV), so it is suggestive rather than settled. **This is a finding against the
+  modelling choice in this repo and is recorded deliberately.**
+- **Where the neutron fit's chi2 comes from, per energy.** The 1.8-2.4 meV band is 24% of the
+  fit window's width but carries 45% of `chi2` on average. It must be read against where each
+  mode sits: `(0,1,0)` 9 T is 72% but its mode is *in* the band and that cut carries no 2.08 meV
+  background, so that share is the magnon and is desirable. The red flags are the 9 T dispersive
+  cuts at **35-41% with their modes at ~1.05-1.10 meV, outside the band** — that share is
+  instrumental artefact, and it is the measured mechanism behind the gzz pull to 3.70.
+  `(0,1,0)` 14 T is only 16% because its mode has essentially left the window, which is the
+  window-exit artefact seen from another angle.
 
 ## Protocol for M(H) work
 
