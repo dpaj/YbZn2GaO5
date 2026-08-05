@@ -28,19 +28,20 @@
 #   difference scatter  sd of [chi2_red(P2) - chi2_red(P1)] across the same sets
 #   CRN gain            level / difference -- how much the common random numbers buy
 #
-# Sets are DISJOINT blocks of the realization index AT A GIVEN n, so they are independent draws at
-# that n: 0:3, 4:7, 8:11, 12:15 for n = 4 and 0:7, 8:15 for n = 8.
+# EVERY BLOCK IS DISJOINT FROM EVERY OTHER, across n as well as within it -- n = 4 uses 0:15, n = 8
+# uses 16:47, n = 2 uses 48:63. That matters, and the FIRST version of this script got it wrong: it
+# reused 0:15 for both n values, so the n = 8 blocks CONTAINED the n = 4 blocks and the scaling test
+# compared a statistic against a sub-sample of itself.
 #
-# BUT THE TWO n VALUES ARE NOT INDEPENDENT OF EACH OTHER, and this bit me. The n = 8 blocks CONTAIN
-# the n = 4 blocks (0:7 is 0:3 plus 4:7), so comparing them is comparing a statistic against a
-# sub-sample of itself rather than a clean scaling test. It went badly here: the pairing happened to
-# put a high n = 4 block with a low one BOTH times, giving sd 0.83 for the pair-means where 2.70 was
-# expected, so n = 8 came out ~4x better than 1/sqrt(n) purely on the luck of two samples. A clean
-# scaling test needs n = 8 blocks drawn from FRESH realizations (16:23, 24:31, ...).
+# It failed in a flattering direction, which is the dangerous kind. The nesting happened to pair a
+# high n = 4 block with a low one BOTH times, giving sd 0.83 for the pair-means where 2.70 was
+# expected if independent -- so n = 8 came out ~4x better than 1/sqrt(n) on the luck of two samples,
+# and the sizing extrapolated from it was 4x too optimistic. Three n values with four or more
+# independent blocks each now give a real trend rather than a two-point line through one fluke.
 #
-# So the extrapolation below uses the estimate with the most DEGREES OF FREEDOM rather than the
-# largest n: at 4 blocks, n = 4 has 3 dof while n = 8 has 1 dof and is uncertain by roughly 2x in sd.
-# An earlier version extrapolated from the largest n and was 4x too optimistic about sizing.
+# The extrapolation still uses the estimate with the most DEGREES OF FREEDOM rather than the largest
+# n, and prints which basis it chose, because dof is what controls how much an sd can be trusted:
+# an sd from 2 blocks is itself uncertain by roughly a factor of 2.
 #
 # The perturbation is deliberately SMALL and along gzz, the direction the optimizer is most sensitive
 # to and the one currently pinning against its bound. A perturbation much larger than the noise would
@@ -74,7 +75,12 @@ const PERT = merge(BASE, (; gzz=3.55))
 cuts = SV.sv_load_kpm_experimental_cuts(REPO_ROOT, controls)
 
 # Disjoint realization blocks, so the sets are independent draws rather than overlapping samples.
-const SETS = [(4, [0:3, 4:7, 8:11, 12:15]), (8, [0:7, 8:15])]
+# FRESH, NON-NESTED blocks. The first version reused 0:15 for both n, so the n = 8 blocks
+# CONTAINED the n = 4 blocks and the scaling test compared a statistic to a sub-sample of itself.
+# n = 8 now draws from 16:47 and n = 2 from 48:63, all disjoint from each other and from n = 4.
+const SETS = [(2, [48:49, 50:51, 52:53, 54:55, 56:57, 58:59, 60:61, 62:63]),
+              (4, [0:3, 4:7, 8:11, 12:15]),
+              (8, [16:23, 24:31, 32:39, 40:47])]
 const TDIR = SV.sv_repo_path(REPO_ROOT,
     "results/feature_tables/sunny_validation/realization_scatter_chi2")
 mkpath(TDIR)
