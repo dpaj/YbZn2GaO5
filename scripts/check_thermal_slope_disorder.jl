@@ -74,10 +74,22 @@ Self-consistent mean-field magnetization for effective S = 1/2 with g disorder.
 so M = mean(g_i)/2 and no iteration is needed.
 """
 function mvh_meanfield(B, gs, J1, T_K; tol=1e-11, maxit=400)
-    if T_K <= 0
-        return (; M = mean(gs) / 2, s = 0.5, iters = 0, valid = true)
-    end
-    twokT = 2 * KB * T_K
+    # THE T = 0 BRANCH USED TO RETURN mean(gs)/2 UNCONDITIONALLY, AND THAT WAS A BUG that corrupted
+    # the headline result of this script. It assumed every site fully polarized ALONG the field, but
+    # the finite-T formula at T -> 0 gives s_i = -1/2 for any site with h_i < 0, i.e. g_i*muB*B <
+    # z*J1*<s>. At 2.5 T with gbar = 3.5, sigma_gzz = 0.8, J1 = 0.15 that is roughly 19% of sites.
+    # So the reference sat ABOVE the true T -> 0 limit of this very function, and the "thermal
+    # deficit" measured against it absorbed that gap.
+    #
+    # The symptom was visible and I missed it: at 20 mK, kT = 0.0017 meV against a 0.5 meV Zeeman,
+    # so thermal population is nil -- yet the "thermal" slope came out 0.122 uB/T. A thermal effect
+    # cannot survive T -> 0. The DGX caught it by asking exactly that question of the 20 mK row.
+    #
+    # Now T = 0 is evaluated with the SAME self-consistency at a negligible temperature, so the
+    # reference is the true limit of the model rather than an idealisation of it, and what remains in
+    # the deficit is thermal by construction.
+    T_eff = T_K <= 0 ? 1e-6 : T_K
+    twokT = 2 * KB * T_eff
     s = 0.5
     it = 0
     for k in 1:maxit
@@ -124,11 +136,22 @@ end
 maxerr = validate_brillouin()
 @printf("  worst deviation from the Brillouin function: %.2e  ->  %s\n", maxerr,
         maxerr < 1e-12 ? "PASS" : "FAIL -- do not trust anything below")
+# The T -> 0 check must be done at a field high enough that EVERY site has h_i > 0, or it is not a
+# check of the limit but of the idealisation that used to be hard-coded here. At 20 T that holds; at
+# 7 T it does not quite, and the residual is reported rather than asserted -- it is the size of the
+# effect the old T = 0 branch was silently attributing to temperature.
 gs_t = g_sites(3.5, 0.8)
-m0 = mvh_meanfield(7.0, gs_t, 0.15, 0.0).M
-@printf("  T = 0 limit with disorder: M = %.10f, <g>/2 = %.10f, diff %.2e  ->  %s\n\n",
-        m0, mean(gs_t)/2, m0 - mean(gs_t)/2,
-        abs(m0 - mean(gs_t)/2) < 1e-12 ? "PASS" : "FAIL")
+m20 = mvh_meanfield(20.0, gs_t, 0.15, 0.0).M
+@printf("  T -> 0 at 20 T (all h_i > 0): M = %.10f, <g>/2 = %.10f, diff %.2e  ->  %s\n",
+        m20, mean(gs_t)/2, m20 - mean(gs_t)/2,
+        abs(m20 - mean(gs_t)/2) < 1e-9 ? "PASS" : "FAIL")
+for Bc in (2.5, 4.0, 7.0)
+    r = mvh_meanfield(Bc, gs_t, 0.15, 0.0)
+    frac = count(g -> g * MUB * Bc < ZNN * 0.15 * r.s, gs_t) / length(gs_t)
+    @printf("  T -> 0 at %4.1f T: M = %.6f vs <g>/2 = %.6f  (%.1f%% of sites have h_i < 0)\n",
+            Bc, r.M, mean(gs_t)/2, 100 * frac)
+end
+println()
 maxerr < 1e-12 || error("Brillouin limit failed; the implementation is wrong.")
 
 # ---------------------------------------------------------------------------------
