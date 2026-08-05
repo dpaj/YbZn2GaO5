@@ -11,7 +11,17 @@
 
 [paths]
 best_fit_parameters_toml = "configs/best_fit_parameters.toml"
-magnetization_csv = "data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv"
+# SWITCHED 2026-08-05 to the primary MPMS3 reduction. The previous file,
+# YZGO_MvB_black_curve_digitized_visible.csv, was digitized from a FIGURE *and* came from the
+# `DC Moment Fixed Ctr` column, so it was 1.49x too low in absolute value -- see the MPMS3 centring
+# trap in CLAUDE.md. Every M(H) comparison run before this switch silently used it.
+# CONSEQUENCE: any `A_M` or `magnetization_global_scale` from before this date is NOT comparable
+# against one from after, because the data it was fitted to changed by a constant 1.486. Shape fits
+# are unaffected (A_M is profiled out); absolute statements are not.
+# NOTE: this loader takes the first two columns positionally, so the `M_err_muB_per_Yb` column in the
+# new file is currently DROPPED. Absolute-normalisation work needs that error bar (+-5% at 7 T) and
+# should read the CSV directly until the loader carries it.
+magnetization_csv = "data/magnetization/YZGO_MvH_0p42K_Bparc_mpms3.csv"
 neutron_1d_dir = "data/neutron/CNCS_1d_scans"
 neutron_2d_dir = "data/neutron/CNCS_2d_scans"
 cif_path = "data/cif/ICSD_CollCode138765.cif"

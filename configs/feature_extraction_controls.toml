@@ -7,6 +7,14 @@
 
 [data]
 neutron_1d_subdir = "data/neutron/CNCS_1d_scans"
+# DELIBERATELY still the SUPERSEDED digitized file, unlike sunny_validation_controls.toml which was
+# switched to the primary MPMS3 reduction on 2026-08-05. This config drives the LEGACY analytical
+# co-fit, and `magnetization_global_scale = 0.4189` was fitted against exactly this file. Switching
+# it here would silently break reproducibility of every legacy number without improving them, since
+# the legacy path does not make absolute claims.
+# SO: this file is 1.49x too low in absolute magnetization (digitized from a figure, and from the
+# wrong `DC Moment Fixed Ctr` column -- see CLAUDE.md). Do not read an absolute moment off the legacy
+# path. Use the Sunny path for anything absolute.
 magnetization_csv = "data/magnetization/YZGO_MvB_black_curve_digitized_visible.csv"
 
 [neutron]

@@ -28,9 +28,19 @@
 #   difference scatter  sd of [chi2_red(P2) - chi2_red(P1)] across the same sets
 #   CRN gain            level / difference -- how much the common random numbers buy
 #
-# Sets are DISJOINT blocks of the realization index, so they are genuinely independent draws:
-# n = 4 gives 0:3, 4:7, 8:11, 12:15 and n = 8 gives 0:7, 8:15. Going 4 -> 8 also tests the expected
-# 1/sqrt(n) fall, which is what licenses extrapolating to whatever n the big fit ends up using.
+# Sets are DISJOINT blocks of the realization index AT A GIVEN n, so they are independent draws at
+# that n: 0:3, 4:7, 8:11, 12:15 for n = 4 and 0:7, 8:15 for n = 8.
+#
+# BUT THE TWO n VALUES ARE NOT INDEPENDENT OF EACH OTHER, and this bit me. The n = 8 blocks CONTAIN
+# the n = 4 blocks (0:7 is 0:3 plus 4:7), so comparing them is comparing a statistic against a
+# sub-sample of itself rather than a clean scaling test. It went badly here: the pairing happened to
+# put a high n = 4 block with a low one BOTH times, giving sd 0.83 for the pair-means where 2.70 was
+# expected, so n = 8 came out ~4x better than 1/sqrt(n) purely on the luck of two samples. A clean
+# scaling test needs n = 8 blocks drawn from FRESH realizations (16:23, 24:31, ...).
+#
+# So the extrapolation below uses the estimate with the most DEGREES OF FREEDOM rather than the
+# largest n: at 4 blocks, n = 4 has 3 dof while n = 8 has 1 dof and is uncertain by roughly 2x in sd.
+# An earlier version extrapolated from the largest n and was 4x too optimistic about sizing.
 #
 # The perturbation is deliberately SMALL and along gzz, the direction the optimizer is most sensitive
 # to and the one currently pinning against its bound. A perturbation much larger than the noise would
@@ -132,13 +142,21 @@ if length(summary) >= 2
             a.n, b.n, sqrt(a.n / b.n))
     @printf("  level scatter      %.4f -> %.4f   ratio %.3fx\n", a.lvl, b.lvl, b.lvl / a.lvl)
     @printf("  difference scatter %.4f -> %.4f   ratio %.3fx\n", a.dif, b.dif, b.dif / a.dif)
-    # What n would be needed to resolve a target improvement, extrapolating 1/sqrt(n) from n = b.n.
-    println("\nRealizations needed to resolve a given chi2_red improvement at 2 sd,")
-    println("extrapolating the DIFFERENCE scatter as 1/sqrt(n) from the largest n measured:")
+    # Extrapolate from the estimate with the most DEGREES OF FREEDOM, not the largest n. See the
+    # nesting note in the header: an earlier version used the largest n and was 4x too optimistic,
+    # because the n = 8 blocks contain the n = 4 blocks and their pairing happened to be lucky.
+    ref   = argmax(x -> x.nb, summary)
+    other = argmin(x -> x.nb, summary)
+    @printf("\nBasis for extrapolation: n = %d, %d blocks (%d dof), difference sd = %.4f\n",
+            ref.n, ref.nb, ref.nb - 1, ref.dif)
+    println("Realizations needed to resolve a chi2_red improvement at 2 sd, taking sd ~ 1/sqrt(n).")
+    println("The bracketed column is the same figure from the OTHER n -- shown only to expose the")
+    println("spread; it is the low-dof, nested estimate and must NOT be used for sizing.")
     for target in (0.1, 0.25, 0.5, 1.0, 2.0)
-        nreq = b.n * (2 * b.dif / target)^2
-        @printf("  resolve %.2f in chi2_red : n >= %6.1f   (~%.1f h per evaluation at %.0f s/realization)\n",
-                target, nreq, nreq * 90 / 3600, 90.0)
+        nreq = ref.n * (2 * ref.dif / target)^2
+        nalt = other.n * (2 * other.dif / target)^2
+        @printf("  resolve %.2f : n >= %7.1f  (~%5.1f h per evaluation)   [low-dof: %7.1f]\n",
+                target, nreq, nreq * 90 / 3600, nalt)
     end
 end
 
@@ -161,6 +179,9 @@ for (q, B) in tags
 end
 
 @printf("\ntotal %.2f h  ->  %s\n", (time()-t0)/3600, joinpath(TDIR, "realization_scatter.csv"))
-println("\nCAVEAT: with only 2 blocks at the largest n, sd is a 1-degree-of-freedom estimate and is")
-println("itself uncertain by roughly a factor of 2. Treat the n = 4 figures (3 dof) as the reliable")
-println("ones and the n = 8 scaling check as indicative.")
+println("\nTWO CAVEATS, both structural rather than statistical bad luck.")
+println("1. With only 2 blocks at n = 8, that sd is a 1-dof estimate uncertain by roughly 2x.")
+println("2. The n = 8 blocks CONTAIN the n = 4 blocks, so the 4 -> 8 comparison is a statistic")
+println("   against a sub-sample of itself, NOT an independent scaling test. Here the pairing was")
+println("   lucky and n = 8 came out ~4x better than 1/sqrt(n). A clean test needs n = 8 blocks from")
+println("   FRESH realizations (16:23, 24:31, ...). Until then, size from the n = 4 figures.")
