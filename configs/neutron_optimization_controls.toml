@@ -36,6 +36,24 @@ free_parameters = ["J1_meV", "sigma_J", "gzz", "sigma_gzz"]
 # EXCLUDING the 14 T Gamma window-exit at gzz = 3.702 -- past which chi2 falls simply because
 # the mode leaves the [0.5, 3.0] meV window and there is less in-window weight to be wrong
 # about. The earlier [2.8, 4.2] let the optimizer exploit exactly that artefact.
+#
+# THE 3.7 UPPER BOUND IS NOW KNOWN TO BE BINDING FOR TWO DIFFERENT REASONS AT ONCE, and DO NOT
+# simply widen it. The variance on/off scan (scripts/check_background_variance_effect.jl) measured
+# per-cut gzz preference over 3.30-3.70 and found THREE cuts pressing the upper edge:
+#
+#   (0,1,0)@14T        falls monotonically to 3.70 -- but its mode is LEAVING the window, so this
+#                      is the artefact the bound was put here to exclude. Legitimate to block.
+#   (0.33,0.33,0)@9T   falls monotonically to 3.70 with its mode at ~1.05 meV, mid-window
+#   (0.5,0,0)@9T       same
+#
+# The last two are NOT the window-exit artefact -- their modes are nowhere near the 3.0 meV edge --
+# and the background-variance test confirmed their preference is not a background artefact either
+# (down-weighting the 2.08 meV band by 133x in variance does not move them at all). So the bound is
+# doing a legitimate job for one cut and an illegitimate one for two, by restricting a parameter all
+# six share. That is the wrong instrument, and the fix is a measurement, not a looser number:
+# scan past 3.7 with (0,1,0)@14T INCLUDED and EXCLUDED and compare, so the window-exit contribution
+# is separated from the genuine one before any bound is moved. Until that is done, widening this
+# bound re-opens a known artefact, and leaving it pins two cuts that have earned their preference.
 lower_bounds = [0.05, 0.00, 3.2, 0.0]
 # sigma_J capped at 0.60: it is FRACTIONAL, so bonds change sign when randn < -1/sigma_J --
 # ~5% of bonds at 0.60 but ~16% at 1.0. Past ~0.6 this becomes a random-sign bond model,
