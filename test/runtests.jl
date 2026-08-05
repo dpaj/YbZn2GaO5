@@ -445,6 +445,46 @@ end
     @test all(v -> all(iszero, v), bg)
 end
 
+@testset "cut weighting is optional and defaults to pooled" begin
+    # The aggregation convention is a SCIENTIFIC choice, so the invariant that matters is that the
+    # default cannot drift: every chi2 in this repo, and the cross-machine target, is :pooled.
+    controls = SV.sv_load_controls(REPO_ROOT)
+    kc = controls["kpm"]
+    kc["dims"] = [3, 3, 1]; kc["system_size"] = [12, 12, 1]; kc["repeat_factor"] = [4, 4, 1]
+    kc["tol"] = 0.1; kc["maxiters"] = 500; kc["regularization"] = 1e-5
+    kc["energy_min_meV"] = 0.2; kc["energy_max_meV"] = 3.5; kc["n_energy"] = 25
+    kc["kernel_fwhm_meV"] = 0.1
+    kc["experimental_histogram"]["enabled"] = false
+    kc["q_averaging"]["enabled"] = false
+    (; params) = SV.sv_load_params(REPO_ROOT, controls)
+    params = merge(params, (; J1_meV=0.15, J2_meV=0.01, sigma_J=0.5, sigma_gzz=0.8, gzz=3.5))
+    cuts = SV.sv_load_kpm_experimental_cuts(REPO_ROOT, controls)
+
+    base = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                   maxiters=500, relax_attempts=1)
+    @test base.cut_weighting === :pooled
+    @test base.chi2_red === base.chi2_red_pooled
+
+    # Asking for the default explicitly must be BIT-FOR-BIT identical.
+    p = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                maxiters=500, relax_attempts=1, cut_weighting=:pooled)
+    @test p.chi2_red == base.chi2_red
+
+    # :equal must return the unweighted mean of the per-cut values, and must NOT change them --
+    # only the aggregation. Both conventions are reported either way.
+    e = SV.sv_neutron_objective(params, controls, cuts; realizations=0:0, threaded=true,
+                                maxiters=500, relax_attempts=1, cut_weighting=:equal)
+    @test e.cut_weighting === :equal
+    @test e.chi2_red === e.chi2_red_equal
+    @test [pc.chi2_red for pc in e.per_cut] == [pc.chi2_red for pc in base.per_cut]
+    @test isapprox(e.chi2_red, mean(pc.chi2_red for pc in base.per_cut); rtol=1e-12)
+    @test isapprox(e.chi2_red_pooled, base.chi2_red_pooled; rtol=1e-12)
+    # The scale is a nuisance parameter fitted with pooled weights in both cases, by design.
+    @test e.scale == base.scale
+    @test_throws ErrorException SV.sv_neutron_objective(params, controls, cuts; realizations=0:0,
+        threaded=true, maxiters=500, relax_attempts=1, cut_weighting=:bogus)
+end
+
 @testset "M(H) path characterization" begin
     # CHARACTERIZATION, not validation. These pin the CURRENT behaviour of the M(H) path so that
     # the planned refactor cannot change it silently. They deliberately assert conventions rather

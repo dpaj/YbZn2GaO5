@@ -3311,7 +3311,8 @@ far below that are not meaningful.
 """
 function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
         window=nothing, use_errors::Bool=true,
-        background_sigma::Union{Nothing,AbstractVector}=nothing, kwargs...)
+        background_sigma::Union{Nothing,AbstractVector}=nothing,
+        cut_weighting::Symbol=:pooled, kwargs...)
     kc = controls["kpm"]
     win = window === nothing ?
         Tuple(Float64.(get(kc, "neutron_scale_fit_window_meV", [0.5, 3.0]))) : window
@@ -3369,7 +3370,40 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
         end
         isempty(ratios) || (infl = median(ratios))
     end
-    return (; chi2_red = !ok ? Inf : (ndof > 0 ? chi2 / ndof : NaN),
+    # TWO AGGREGATION CONVENTIONS, and the choice is scientific rather than cosmetic.
+    #
+    # :pooled (the default, and what every number in this repo so far used) sums chi2 over all
+    # points and divides by the total, so a cut contributes in proportion to BOTH its point count
+    # and HOW BADLY IT FITS. That is standard least squares, and it is the wrong thing here if one
+    # sector of the model is misspecified: a badly-fitting sector then dominates the gradient and
+    # biases parameters it SHARES with a well-specified sector, in proportion to its own badness.
+    #
+    # That is not hypothetical here. The 9 T dispersive cuts carry ~10x the chi2 of (0,1,0)@9T and
+    # pull gzz to 3.70, while (0,1,0)@9T -- the ONLY cut where the exchange cancels identically, so
+    # g is fixed by peak position with no J dependence, i.e. the cleanest g determination available
+    # -- prefers 3.30 and has the LEAST influence. Under :pooled the cleanest measurement is
+    # outvoted by the two cuts whose poor fit is itself the thing needing explanation.
+    #
+    # :equal gives every cut the same weight (unweighted mean of per-cut chi2_red), removing both
+    # the point-count and the badness-of-fit advantage.
+    #
+    # NEITHER IS OBVIOUSLY RIGHT, which is why both are always computed and reported and the
+    # default is unchanged. Run both and carry the spread, per the working principle in CLAUDE.md.
+    #
+    # KNOWN ASYMMETRY, stated rather than hidden: the intensity scale is fitted with POOLED weights
+    # in both cases, because sv_neutron_weighted_scale takes no cut weighting. So :equal changes the
+    # aggregation only, not the nuisance-parameter fit. That isolates one change at a time, which is
+    # what makes the comparison interpretable.
+    cut_weighting in (:pooled, :equal) ||
+        error("cut_weighting must be :pooled or :equal, got $(cut_weighting)")
+    chi2_red_pooled = ndof > 0 ? chi2 / ndof : NaN
+    percut_vals = [pc.chi2_red for pc in per_cut if isfinite(pc.chi2_red)]
+    chi2_red_equal = isempty(percut_vals) ? NaN : mean(percut_vals)
+    chosen = cut_weighting === :equal ? chi2_red_equal : chi2_red_pooled
+    return (; chi2_red = !ok ? Inf : chosen,
+              cut_weighting,
+              chi2_red_pooled = !ok ? Inf : chi2_red_pooled,
+              chi2_red_equal = !ok ? Inf : chi2_red_equal,
               background_variance_used = background_sigma !== nothing,
               background_variance_inflation = infl,
               rms = !ok ? Inf : (nn > 0 ? sqrt(ss / nn) : NaN),
