@@ -86,6 +86,7 @@ rest on. Run in order; Stage 1 for Ei = 4.65 is the production one.
 | `analyze_neutron_optimum.jl` | medium | Follow-up once the chains finish. |
 | `check_background_variance_effect.jl` | heavy | Acceptance test for the background-variance term: per-cut gzz preference with the variance on vs off (~1 h). A **validation of the UQ machinery**, not a parameter refinement. It **failed its own prediction** — the 9 T dispersive cuts do not move — which is how we learned that a χ² *budget* does not tell you what drives a parameter. |
 | `plot_background_variance_effect.jl` | free | Plots the above from its CSV — no recompute. Read its header for the refuted-mechanism argument. |
+| `check_realization_scatter_chi2.jl` | heavy | **The noise floor in the units a fit consumes** (~1.6 h). The 12–15% realization floor on record is a *spectrum* spread; a fit consumes `chi2_red`. Measures the level scatter and — the number that actually matters — the scatter in the *difference* between two nearby parameter points under common random numbers, which is the resolution limit on "is B better than A". Also reports the `n` needed to resolve a given improvement. |
 | `scan_gamma_first_parameters.jl` | heavy | Factorized "Γ-first" parameter scan. |
 | `plot_gamma_first_scan.jl` | free | Reads the scan CSV only — no recompute. |
 | `run_cofit_9T14T.jl` | heavy | The neutron + magnetization co-fit driver. |

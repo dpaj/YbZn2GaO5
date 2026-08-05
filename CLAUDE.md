@@ -84,6 +84,15 @@ goes ON TOP OF the disorder model, not instead of it.** Do not read a poor chi2 
 dispersive cuts as support for the published model -- see the K/M misfit note under
 Established results.
 
+**DECIDED (2026-08-05): exchange anisotropy is IN SCOPE for the eventual "big" fit, and OUT of
+scope until the stage is set.** There are now three independent hints toward it -- the 1 T
+`M_par/M_perp` ratio against the g^2 prediction, the `B_sat` mismatch (~3.3 T from neutrons against
+~4.0 T from M(H)), and the `(0,1,0)`-versus-K/M `gzz` tension that survived the background-variance
+test. That is enough to include Delta as a fit parameter later; it is **not** a reason to add it
+now. Adding a parameter before the noise floor, the bounds and the compute plan are settled would
+mean fitting it against an objective whose resolution we have not measured. Do not open this thread
+early -- and do not quietly drop it either, because three hints is not nothing.
+
 Also note that **J1 and most other parameters were inherited from the earlier analytical
 model**, which cannot represent mode mixing between the different exchange environments.
 Sunny/KPM can. So the mean of the J1 distribution shifting once a proper disorder
