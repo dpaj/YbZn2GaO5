@@ -15,6 +15,14 @@
 
 using Printf, Statistics, LinearAlgebra, Optim, Sunny
 
+# PIN BLAS TO ONE THREAD. Julia's q-chunking already uses every core, and OpenBLAS defaults to
+# spawning its own pool inside each chunk -- so N Julia threads x M BLAS threads oversubscribes the
+# box and the throughput curve INVERTS past ~8 chunks. Measured on the DGX: an unpinned run under
+# `-t auto` peaked at 8 chunks / 4.27x and then degraded, while the same code with BLAS pinned kept
+# improving to 64 threads / 13.5x -- 3.75x apart at 32 chunks. An unpinned thread curve therefore
+# looks authoritative and prescribes the wrong recipe.
+BLAS.set_num_threads(1)
+
 const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
 include(joinpath(REPO_ROOT, "src", "YZGOCofit.jl")); using .YZGOCofit
 include(joinpath(REPO_ROOT, "src", "sunny_validation.jl")); using .SunnyValidation

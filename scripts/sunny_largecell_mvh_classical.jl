@@ -95,8 +95,14 @@ end
 # System construction: minimal single disordered phase
 # -----------------------------------------------------------------------------
 
+# `diag_run` is taken so that EVERY stage reads the same switches from one place. It used to be
+# omitted, and `spin_rescaling_for_static_sum_rule` was applied only inside `_sweep` -- so the
+# validation stage, whose whole purpose is checking classical against quantum above saturation, was
+# structurally blind to the correction it exists to validate, and reported the same 18-30% S = 1/2
+# deficit whether the flag was set or not. A check that cannot see the correction it certifies is
+# worse than no check, because it looks authoritative. Applying it here makes that impossible.
 function _build_system(params, controls::Dict, cell_size, seed_dims, realization::Int;
-                       field_T::Real=0.0)
+                       field_T::Real=0.0, diag_run::Union{Nothing,Dict}=nothing)
     seed_dims_t = _tuple3(seed_dims)
     rf = _repeat_factor(cell_size, seed_dims_t)
     lc = get(controls, "largecell", Dict{String,Any}())
@@ -112,7 +118,12 @@ function _build_system(params, controls::Dict, cell_size, seed_dims, realization
         include_gzz=Bool(get(lc, "include_gzz_disorder", true)),
         realization=realization)
 
-    return (; sys, crystal=base.crystal, units=base.units, repeat_factor=rf)
+    # Applied HERE rather than in the callers, so no stage can silently miss it. See the note above.
+    rescaled = diag_run !== nothing &&
+               Bool(get(diag_run, "spin_rescaling_for_static_sum_rule", false))
+    rescaled && set_spin_rescaling_for_static_sum_rule!(sys)
+
+    return (; sys, crystal=base.crystal, units=base.units, repeat_factor=rf, rescaled)
 end
 
 function _initialize_field_polarized!(sys, uhat; field_T::Real=1.0)
@@ -198,22 +209,21 @@ function _sweep(params, controls::Dict, diag_run::Dict, cell_size, seed_dims, re
     n_th = Int(get(diag_run, "n_thermalize", 3000))
     n_sa = Int(get(diag_run, "n_sample", 500))
     stride = Int(get(diag_run, "sample_stride", 10))
-    rescale = Bool(get(diag_run, "spin_rescaling_for_static_sum_rule", false))
+    # NOTE: spin_rescaling_for_static_sum_rule is deliberately NOT read here. _build_system applies
+    # it for every stage, and `built.rescaled` below reports what was actually applied rather than
+    # what the config asked for -- which is the distinction that hid the bug in the first place.
     adiabatic = Bool(get(diag_run, "adiabatic_field_continuation", true))
     relax_before_thermalize = Bool(get(diag_run, "relax_before_thermalize", true))
     init_state = String(get(diag_run, "initial_spin_state", "field_polarized"))
     cell_label = join(string.(_tuple3(cell_size)), "x")
 
     built = _timed!(profile, "build_system", () ->
-        _build_system(params, controls, cell_size, seed_dims, realization; field_T=0.0);
+        _build_system(params, controls, cell_size, seed_dims, realization; field_T=0.0,
+                      diag_run=diag_run);
         cell=cell_label, realization=realization, sampler=sampler,
         note=@sprintf("seed_dims=%s", join(string.(_tuple3(seed_dims)), "x")))
     sys = built.sys
     nsites = prod(_tuple3(cell_size))
-
-    if rescale
-        set_spin_rescaling_for_static_sum_rule!(sys)
-    end
 
     if init_state == "field_polarized"
         _initialize_field_polarized!(sys, uhat; field_T=1.0)
@@ -337,7 +347,8 @@ function _run_validation(params, controls::Dict, diag_run::Dict, cell_size, seed
 
     rows = NamedTuple[]
     for B in fields
-        built = _build_system(params, controls, cell_size, seed_dims, 0; field_T=B)
+        built = _build_system(params, controls, cell_size, seed_dims, 0; field_T=B,
+                             diag_run=diag_run)
         sys = built.sys
         # Re-assert the field explicitly rather than trusting it to survive
         # repeat_periodically / to_inhomogeneous.
@@ -411,7 +422,8 @@ function _run_convergence_scan(params, controls::Dict, diag_run::Dict, cell_size
     rows = NamedTuple[]
     println("  dt / damping convergence at B = $(B) T (equilibrium M must not depend on damping):")
     for dt in dts, damping in dampings
-        built = _build_system(params, controls, cell_size, seed_dims, 0; field_T=B)
+        built = _build_system(params, controls, cell_size, seed_dims, 0; field_T=B,
+                             diag_run=diag_run)
         sys = built.sys
         _set_field!(sys, uhat, units, B)
         _initialize_field_polarized!(sys, uhat; field_T=B)
