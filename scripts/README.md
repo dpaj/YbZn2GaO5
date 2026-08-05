@@ -92,6 +92,8 @@ rest on. Run in order; Stage 1 for Ei = 4.65 is the production one.
 | `run_cofit_9T14T.jl` | heavy | The neutron + magnetization co-fit driver. |
 | `run_cofit_9T14T_smoke.jl` | cheap | Smoke test for the above. Run this first. |
 
+| `check_thermal_slope_disorder.jl` | free | Does thermal population of disorder-induced low-lying levels produce the mystery upward dM/dH? Mean-field, effective S = 1/2, quantum statistics, validated against the Brillouin limit. **Valid only above ~2.5 T** — read its header for why, and for the lesson about limit checks that exercise the wrong term. |
+
 ## Health checks — run these before committing or after pulling
 
 | script | cost | what it does |

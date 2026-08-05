@@ -16,8 +16,15 @@
 # XXZ with Delta ~ 1.35. It isolates what DISORDER does, nothing more.
 #
 # A_M and the linear (Van Vleck-like) slope are profiled out per set by nonnegative least
-# squares, so this compares SHAPE. The absolute scale is not trustworthy -- the experimental
-# normalisation is itself suspect.
+# squares, so panels 1-4 compare SHAPE.
+#
+# PANEL 5 IS NEW AND IS THE POINT OF THE UPDATE. The old comment here said the absolute scale was
+# not trustworthy because the experimental normalisation was suspect. That is no longer true: the
+# MPMS3 centring correction fixed it, and three independent numbers now agree at ~7 T to four
+# digits -- MPMS3 0.42 K free-centring 1.6512, DynaCool 2.5 K on a DIFFERENT crystal 1.6522, and the
+# Bag et al. Supplement ~1.65. So the absolute comparison is available for the first time, and it
+# tests something the shape fit CANNOT: A_M being profiled out means a level error is invisible by
+# construction. Panel 5 shows the model with NO A_M against the data, and the ratio versus field.
 
 using Printf, Statistics, LinearAlgebra, CairoMakie, Sunny
 
@@ -109,7 +116,7 @@ function deriv(x, y)
 end
 
 cols = [:crimson, :dodgerblue, :seagreen, :darkorange, :purple]
-fig = Figure(size = (1500, 1000))
+fig = Figure(size = (1500, 1480))
 Label(fig[0, 1:2],
       "YbZn2GaO5 -- M(H) at 0.42 K.  Parameters fitted to the NEUTRON SPECTRA ALONE, " *
       "tested against magnetization";
@@ -172,11 +179,45 @@ lines!(ax4, Bs, 0.0171 .* Bs; color = :grey40, linewidth = 2.0, linestyle = :das
        label = "crystal-field Van Vleck (0.0171 uB/T)")
 axislegend(ax4; position = :lt, labelsize = 9)
 
-Label(fig[3, 1:2],
+Label(fig[4, 1:2],
       "Clean = same Hamiltonian with sigma_J = sigma_gzz = 0. It is a control isolating what " *
       "DISORDER does, not a reproduction of the published model, which uses XXZ with " *
       "Delta ~ 1.35 while this model is isotropic Heisenberg with all anisotropy in g.";
       fontsize = 11, color = :grey30)
+
+# ---- 5  ABSOLUTE comparison, which profiling A_M out makes invisible -------------
+ax5 = Axis(fig[3, 1], xlabel = "field (T)", ylabel = "M (uB / Yb)",
+           title = "ABSOLUTE: no A_M, no fitted linear term (newly possible)")
+scatter!(ax5, Bs, M_exp; color = :black, markersize = 7, label = "experiment (corrected MPMS3)")
+for (k, r) in enumerate(results)
+    c = cols[mod1(k, length(cols))]
+    lines!(ax5, Bs, r.obj.raw; color = c, linewidth = 2.4, label = "$(r.name) raw spin")
+end
+# The crystal-field Van Vleck term is a genuine addition to the spin moment for an EFFECTIVE
+# S = 1/2, so the honest absolute model is raw + chi_VV*B with chi_VV from the crystal field --
+# NOT the fitted value, which the absolute data itself excludes.
+lines!(ax5, Bs, results[1].obj.raw .+ 0.0171 .* Bs; color = :grey35, linewidth = 2.0,
+       linestyle = :dash, label = "$(results[1].name) + CEF Van Vleck")
+axislegend(ax5; position = :rb, labelsize = 8)
+
+ax6 = Axis(fig[3, 2], xlabel = "field (T)", ylabel = "model / experiment",
+           title = "Absolute ratio -- a SHAPE error, not a scale offset")
+for (k, r) in enumerate(results)
+    c = cols[mod1(k, length(cols))]
+    ok = M_exp .> 0.05
+    lines!(ax6, Bs[ok], (r.obj.raw .+ 0.0171 .* Bs)[ok] ./ M_exp[ok]; color = c, linewidth = 2.4,
+           label = r.name)
+end
+hlines!(ax6, [1.0]; color = (:black, 0.55), linestyle = :dash)
+axislegend(ax6; position = :rt, labelsize = 9)
+text!(ax6, 0.05, 0.06; space = :relative, fontsize = 9.5, color = :grey25,
+      text = "A ratio that DECLINES with field is a shape error: the model polarises too
+" *
+             "easily at low field and the two converge only as saturation is forced.
+" *
+             "A pure normalisation error would be a flat offset. This is what profiling
+" *
+             "A_M out was hiding, and it is the defect the spurious linear term patched.")
 
 out = joinpath(FDIR, "mvh_parameter_sets.png")
 save(out, fig; px_per_unit = 2)

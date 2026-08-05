@@ -3378,14 +3378,34 @@ function sv_neutron_objective(params, controls::Dict, cuts::AbstractVector;
     # sector of the model is misspecified: a badly-fitting sector then dominates the gradient and
     # biases parameters it SHARES with a well-specified sector, in proportion to its own badness.
     #
-    # That is not hypothetical here. The 9 T dispersive cuts carry ~10x the chi2 of (0,1,0)@9T and
-    # pull gzz to 3.70, while (0,1,0)@9T -- the ONLY cut where the exchange cancels identically, so
-    # g is fixed by peak position with no J dependence, i.e. the cleanest g determination available
-    # -- prefers 3.30 and has the LEAST influence. Under :pooled the cleanest measurement is
-    # outvoted by the two cuts whose poor fit is itself the thing needing explanation.
+    # :equal gives every cut the same weight: the UNWEIGHTED mean of per-cut chi2_red, removing the
+    # point-count advantage.
     #
-    # :equal gives every cut the same weight (unweighted mean of per-cut chi2_red), removing both
-    # the point-count and the badness-of-fit advantage.
+    # READ THIS BEFORE EXPECTING :equal TO CHANGE ANYTHING. On the CURRENT six-cut set it is an
+    # exact NO-OP, and an earlier version of this comment claimed more than that and was wrong.
+    #
+    #   * All six cuts contribute exactly 50 in-window points, so the point-count-weighted mean and
+    #     the unweighted mean coincide BY ARITHMETIC. Measured: both give 24.106438 identically.
+    #   * :equal does NOT remove the badness-of-fit advantage, which is what the earlier comment
+    #     asserted. Both conventions are means of per-cut chi2_red, and a badly-fitting cut still
+    #     carries a large chi2_red into either mean. Down-weighting a cut FOR fitting badly requires
+    #     a deliberate weight (1/chi2, or per-cut variance inflation), which is assuming the answer.
+    #
+    # So the gzz pull toward 3.70 by the two 9 T dispersive cuts is NOT a weighting artefact. Their
+    # chi2_red is genuinely 2-3x that of (0,1,0)@9T, and that is badness of fit, not convention. The
+    # honest statement of the tension comes from EXCLUSION rather than reweighting: (0,1,0)@9T alone,
+    # where the exchange cancels identically so g is fixed by peak position with no J dependence,
+    # prefers gzz = 3.30, while all six together prefer 3.60 under either convention -- 0.30 apart,
+    # about 5x the +-0.057 realization uncertainty.
+    #
+    # :equal is kept because it becomes live the moment cuts stop having equal point counts -- which
+    # is exactly what a per-cut energy window would create -- and because having both computed makes
+    # that dependence visible instead of implicit.
+    #
+    # Worth recording alongside: the per-cut noise measurement shows (0,1,0)@9T discriminates gzz at
+    # ~31 sigma against ~18 sigma for the dispersive cuts, so it carries the MOST information per
+    # unit noise while contributing the least chi2. That is an argument for information-based
+    # weighting, which is a different and more defensible thing than :equal, and is not implemented.
     #
     # NEITHER IS OBVIOUSLY RIGHT, which is why both are always computed and reported and the
     # default is unchanged. Run both and carry the spread, per the working principle in CLAUDE.md.
