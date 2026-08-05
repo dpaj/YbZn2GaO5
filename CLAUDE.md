@@ -274,7 +274,7 @@ neutron crystal, so cross-comparison between them is legitimate.
 |---|---|---|---|---|
 | `mpms3_0p4K/` | MPMS3 + He-3 insert | 0.42-0.50 K | 7 T | B \|\| c, 12.2 mg |
 | `ppms_2p5K/` | DynaCool VSM | 2.5 K | 14 T | B \|\| c (4.81 mg), B ⟂ c (7.7 mg) |
-| `ac_susceptibility/nhmfl/` | SCM1, dilution | 20 mK and 450 mK | 18 T | **B \|\| c only** — see below |
+| `ac_susceptibility/nhmfl/` | SCM1, dilution | 20 mK and 450 mK | 18 T | **both** — coil key is in the xlsx |
 
 ### THE MPMS3 CENTRING TRAP — read before reducing any MPMS3 file
 
@@ -310,56 +310,69 @@ curve sat *below* 2.5 K at every field, which no paramagnet can do.
 digitized from a figure *and* came from the wrong column. It reproduces
 `DC Moment Fixed Ctr` to 4 decimal places.
 
-### THE AC SUSCEPTIBILITY DATASET — read the run log before the column names
+### THE AC SUSCEPTIBILITY DATASET — read the coil key from the xlsx
 
-The AC data were meant to be the sharpest test of the central claim: the published model wants
-field-induced ordered phases with a magnetisation **plateau**, a plateau is a **dip toward zero
-in dM/dH**, and AC susceptibility measures `chi' = dM/dH` *directly* at 20 mK to 18 T — past
-both the 14 T DC data and the 14 T neutron measurements, cold enough that thermal rounding
-cannot hide a feature, and scale-free, so having no absolute units costs nothing.
+The AC data are the sharpest available test of the central claim: the published model wants
+field-induced ordered phases with a magnetisation **plateau**, a plateau is a **dip toward zero in
+dM/dH**, and AC susceptibility measures `chi' = dM/dH` *directly* at 20 mK to 18 T — past both the
+14 T DC data and the 14 T neutron measurements, cold enough that thermal rounding cannot hide a
+feature, and scale-free, so having no absolute units costs nothing.
 
-**The column names are COIL POSITIONS, not samples.** The probe carried three coils and the
-mapping is only in `SCM1_July2025.xlsx`:
+**The column names are COIL POSITIONS, not samples.** The key is in `SCM1_July2025.xlsx`,
+**columns E/F/G, rows 1-2**:
 
 | coil | contents |
 |---|---|
-| `T3` | **YbZn2GaO5, "para" = B \|\| c — OURS, and the only one** |
+| `B1` | **YbZn2GaO5, "perp" = B ⟂ c** |
 | `T1` | LuCu(OH)Br — a *different compound*, another group sharing the probe |
-| `B1` | **not listed in the log**, yet carries the largest signal (6x T3) |
+| `T3` | **YbZn2GaO5, "para" = B ∥ c** |
 
-So **there is no perpendicular AC measurement.** The first analysis here assumed `B1` was the
-perpendicular crystal; that was wrong and self-refuting, because `B1` goes **negative** above
-~12.4 T, which no sample susceptibility can do, and its phase rotates 79° over 0–12 T where
-`T3`'s moves 4°.
+**Both orientations are present.** An earlier version of this file said there was no perpendicular
+measurement. That was **wrong, and the error was ours**: a self-closing empty cell in the xlsx made
+our parser swallow the neighbouring cell, so `B1`'s entry was read as a bare integer and taken for a
+row label. The supporting argument — that `B1` goes negative above ~12.4 T and so cannot be a sample
+— was **also wrong**: a raw lock-in quadrature contains the coil's own mutual-inductance background,
+which is large here, so either quadrature may be negative. **Lesson: work in the complex plane
+(`x1 + i*y1`), not in one quadrature or in the bare magnitude**, because the background and the
+sample response have different phases.
 
-Two more traps. **Only 991 Hz drives**, so `x2`/`x3`/`y2`/`y3` are noise at 1e-9, three orders
-down — use `x1`,`y1`, and prefer the magnitude, which is free of the phase convention. And **the
-log's milliamp figures are heater currents, not fields**, so runs that look like repeats are not:
-015/016 are at **20 mK**, 047/048 at **450–500 mK**.
+Two traps that do stand. **Only the 991 Hz drive produces signal**, so `x2`/`x3`/`y2`/`y3` are noise
+at 1e-9, three orders down — use `x1`,`y1`. And **the log's milliamp figures are heater currents, not
+fields**, so runs that look like repeats are not: 015/016 are at **20 mK**, 047/048 at **450-500 mK**.
 
-**The dataset cannot currently give `chi'`.** `T3`'s magnitude is flat from ~1 to ~10 T and
-reaches ~40% at 18 T, while the DC dM/dH falls to ~5% of its 1 T value by 10 T — a factor ~8
-disagreement, and temperature cannot explain it, since cooling *sharpens* a saturation rather
-than flattening one. Both candidate background models fail:
+**`T1` is an in-situ instrumental reference, and it is what makes the dataset usable.** LuCu(OH)Br
+sits on the same probe in the same magnet at the same temperature and does not saturate over this
+range, so its complex field dependence is a template for the instrumental drift. Referencing each
+channel to its own 18 T value does NOT work — all three coils, including the different compound, then
+show a common near-linear ramp to zero, which no set of three different samples would produce.
+Subtracting a fitted multiple of `T1` instead, each curve normalised to its own 1 T value:
 
-- **constant complex coil offset** — subtracting the full 18 T value leaves 6.77e-7 at 2 T
-  against 6.63e-7 at 8 T, so the flat region survives untouched;
-- **differencing 20 mK against 450 mK**, which should cancel anything depending on coil and
-  magnet but not on the spin state — the residual instead *grows* to 7.8e-8 V by 14–18 T,
-  largest exactly where the sample is most saturated, and changes sign below 2 T.
+| B (T) | perp AC, 20 mK | perp DC, 2.5 K | para AC, 20 mK | para DC, 2.5 K |
+|---|---|---|---|---|
+| 2 | 0.913 | 0.922 | 0.844 | 0.882 |
+| 3 | 0.817 | 0.820 | 0.772 | 0.752 |
+| 5 | 0.345 | 0.691 | 0.724 | 0.452 |
+| 8 | 0.109 | 0.371 | 0.590 | 0.125 |
 
-The DC side of the contradiction is far better characterised — absolute units, two instruments,
-two crystals, agreement with the published SI to four digits — so **this is not evidence against
-the DC data.**
+**The perpendicular channel works** — ~1% agreement with DC at 1-3 T, then saturating *faster*, which
+is the correct direction for 20 mK against a 125x higher temperature. **The parallel channel does
+not**: it stays high where DC says the sample is saturated, and that is unexplained.
 
-**What survives is weaker than intended but real.** A smooth background cannot create or cancel
-a *sharp* feature, so the absence of any dip, step, spike or up/down hysteresis anywhere in
-0–18 T does bound first-order transitions and plateau edges. In both sweep pairs the minimum of
-`chi'` above 2 T sits at the **18 T endpoint** — no interior dip.
+Caveats, because the `T1` scale is fitted: it is fitted on **10-18 T assuming saturation there**, so
+the high-field end of the perp agreement is partly circular while the 1-8 T comparison is not; and
+`T1` is a different sample in a different coil, hence a template for the drift's *shape*, not a
+calibrated background. The fitted scales are large and of opposite sign for the two channels, which
+is a further reason to treat this as provisional.
 
-**Three things are needed from the experiment, not from analysis**: an empty-coil run at matching
-field and temperature, the coil constants, and an account of what coil `B1` held. Until then,
-treat AC as a sharp-feature bound only. See `scripts/plot_ac_susceptibility_plateau_test.jl` and
+**What the dataset supports.** (i) A **sharp-feature bound, needing no calibration at all** — a smooth
+background cannot create or cancel a sharp feature, so the absence of any dip, step, spike or up/down
+hysteresis anywhere in 0-18 T bounds first-order transitions and plateau edges; in both sweep pairs
+the minimum above 2 T sits at the **18 T endpoint**. (ii) A **perpendicular `chi'(H)` shape at 20 mK**
+usable over 1-8 T. (iii) **Not** an absolute `chi'`, and **not** the parallel orientation.
+
+Still worth asking the experiment for: an **empty-coil run** at matching field and temperature, and
+the **coil constants**. Those replace the fitted template with a measured background and would settle
+the parallel channel. See `scripts/plot_ac_susceptibility_plateau_test.jl` and
 `data/ac_susceptibility/nhmfl/PROVENANCE.md`.
 
 ## Established results — do not re-derive
@@ -581,11 +594,14 @@ own scaling knee has not been measured.
    at high disorder? M(H) no longer does.
 5. Where does the excess linear M(H) term come from, if not Van Vleck? Suspect the
    normalization of the digitized data, an impurity, or model error.
-6. **AC susceptibility needs three things from the experiment before it can constrain anything.**
-   An empty-coil run at matching field and temperature, the coil constants, and an account of what
-   coil `B1` held. Until then the dataset supports only a *sharp-feature* bound, because both
-   candidate background models fail — see the AC section above. This is a request to the
-   collaborators, not an analysis task, and it is the cheapest outstanding way to add a genuinely
+6. **AC susceptibility: the PERPENDICULAR channel is usable now; the parallel one is not.** With
+   `T1` (LuCu(OH)Br — same probe, same magnet, non-saturating over this range) as an in-situ
+   template for the instrumental drift, perp `chi'` agrees with DC to ~1% at 1-3 T and saturates
+   faster, as it should at 20 mK against 2.5 K. Para stays high where DC says saturated, and that is
+   unexplained. The `T1` scale is fitted assuming saturation above 10 T, so the high-field end is
+   partly circular while 1-8 T is not. **An empty-coil run at matching field and temperature plus
+   the coil constants** would replace the fitted template with a measured background and settle the
+   parallel channel — a request to the collaborators, and the cheapest way to firm up a genuinely
    independent 18 T observable.
 7. **Co-fit the background with the model refinement.** Noted deliberately, NOT pursued yet.
    The background is currently constructed first and frozen, then the model is fitted to the

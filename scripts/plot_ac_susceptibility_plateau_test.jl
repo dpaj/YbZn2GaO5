@@ -1,67 +1,65 @@
 #!/usr/bin/env julia
-# AC susceptibility at ~20 mK to 18 T: what the NHMFL SCM1 dataset can and cannot tell us.
-# DATA ONLY -- no model, no Sunny, ~1 min.
+# AC susceptibility at 20 mK to 18 T, both orientations. DATA ONLY -- no model, no Sunny, ~1 min.
 #
 #   julia --project=. scripts/plot_ac_susceptibility_plateau_test.jl
 #
-# WHAT THIS WAS BUILT TO TEST, AND WHY IT COULD NOT BE DONE AS INTENDED
+# WHY THIS IS THE SHARPEST AVAILABLE TEST OF THE CENTRAL CLAIM
 #
-# The intended test was sharp: the published model wants field-induced ordered phases with a
-# magnetisation PLATEAU, a plateau is a DIP TOWARD ZERO in dM/dH, and AC susceptibility measures
-# chi' = dM/dH directly at 20 mK to 18 T -- beyond both the 14 T DC data and the 14 T neutron
-# measurements, cold enough that thermal rounding cannot hide a feature, and scale-free so the
-# absence of absolute units costs nothing.
+# The published model wants field-induced ordered phases with a magnetisation PLATEAU. A plateau is
+# a DIP TOWARD ZERO in dM/dH, and AC susceptibility measures chi' = dM/dH DIRECTLY -- M is the
+# derived quantity here, not the measured one. At 20 mK and up to 18 T this reaches past both the
+# 14 T DC data and the 14 T neutron measurements, is cold enough that thermal rounding cannot hide a
+# feature, and being a scale-free shape feature, costs nothing for having no absolute units.
 #
-# Reading the run log (SCM1_July2025.xlsx) rather than guessing from the column names changes what
-# is on offer. The probe carried THREE pickup coils and only one held our sample:
+# THE COIL KEY IS IN THE SPREADSHEET, COLUMNS E/F/G ROWS 1-2. Column names are COIL POSITIONS:
 #
-#   T3   YbZn2GaO5, "para" = B || c     <-- OURS, and the ONLY one
-#   T1   LuCu(OH)Br                     <-- a DIFFERENT COMPOUND, another group on the same probe
-#   B1   not listed in the log          <-- yet carries the LARGEST signal, 6x T3
+#   B1   YbZn2GaO5, "perp" = B PERPENDICULAR to c
+#   T1   LuCu(OH)Br            <-- a DIFFERENT COMPOUND, another group sharing the probe
+#   T3   YbZn2GaO5, "para" = B PARALLEL to c
 #
-# So: THERE IS NO PERPENDICULAR AC MEASUREMENT. An earlier version of this script assumed B1 was
-# the perpendicular crystal, which is wrong -- and the assumption was self-refuting, because B1's
-# in-phase channel crosses zero and goes NEGATIVE above ~12.4 T, which no sample susceptibility can
-# do. Whatever B1 is, it is dominated by instrumental field dependence.
+# BOTH ORIENTATIONS OF OUR SAMPLE ARE PRESENT. An earlier version of this script claimed there was
+# no perpendicular measurement. That was wrong and the error was OURS: a self-closing empty cell in
+# the xlsx made our parser swallow the neighbouring cell, so B1's entry was read as a bare integer
+# and mistaken for a row label. The supporting argument -- that B1 goes negative above ~12.4 T and
+# so cannot be a sample -- was ALSO wrong: a raw lock-in quadrature contains the coil's own
+# mutual-inductance background, which is large here and can dominate, so either quadrature may be
+# negative.
 #
-# ALL THREE COILS ARE READ ON LOCK-IN 1. The three SR830s sit at 991, 313 and 137 Hz, but only 991
-# Hz drives in these runs, so the `x2`/`x3`/`y2`/`y3` columns are noise at 1e-9, three orders down.
-# Use `x1`,`y1` only. Magnitude sqrt(x^2+y^2) is reported throughout because it is free of the
-# lock-in phase convention, and the phase is plotted separately as a diagnostic.
+# HENCE THE METHOD: WORK IN THE COMPLEX PLANE. The coil background and the sample response have
+# different phases, so a single quadrature mixes them and even the bare magnitude can be
+# non-monotonic while the underlying sample response is not. Use z = x1 + i*y1 throughout.
+# Only the 991 Hz drive produces signal -- x2/x3/y2/y3 sit at 1e-9, three orders down.
 #
-# THE RESULT IS A CONTRADICTION WITH OUR OWN DC DATA, NOT A PLATEAU MEASUREMENT
+# THE INSTRUMENTAL DRIFT, AND THE IN-SITU REFERENCE THAT BEATS IT
 #
-# T3's magnitude rises to 1 T, is FLAT from ~1 to ~10 T, then falls, reaching ~40% at 18 T. The DC
-# dM/dH falls to ~5% of its 1 T value by 10 T, because the sample saturates near 5 T. That is a
-# factor ~8 disagreement at 10 T, in the wrong direction for temperature to explain: cooling from
-# 2.5 K to 20 mK SHARPENS a saturation, it cannot flatten one.
+# Referencing each channel to its own 18 T value does NOT isolate the sample: all three coils,
+# INCLUDING the different compound, then show a common near-linear ramp to zero, which no set of
+# three different samples would produce. That common part is instrumental.
 #
-# TWO BACKGROUND MODELS WERE TRIED AND BOTH FAIL.
+# T1 is the handle. LuCu(OH)Br sits on the same probe, in the same magnet, at the same temperature,
+# and does not saturate over this range, so its complex field dependence is a template for the
+# drift. Subtracting a fitted multiple of it from each YZGO channel gives, normalised at 1 T:
 #
-#   A CONSTANT COMPLEX COIL OFFSET. Subtracting the full 18 T complex value leaves 6.77e-7 at 2 T
-#   against 6.63e-7 at 8 T -- still flat. The flat region survives the obvious background model.
+#   B (T)     perp AC 20 mK   perp DC 2.5 K   para AC 20 mK   para DC 2.5 K
+#     2           0.913           0.922           0.844           0.882
+#     3           0.817           0.820           0.772           0.752
+#     5           0.345           0.691           0.724           0.452
+#     8           0.109           0.371           0.590           0.125
 #
-#   DIFFERENCING THE TWO TEMPERATURES. Runs 047/048 are at 450 mK (the log's "4.6 mA" is a heater
-#   current), so 015-047 should cancel any term that depends on coil and magnet but not on the spin
-#   state. The difference is instead at the noise level from 2-7 T and GROWS to 7.8e-8 V by 14-18 T,
-#   largest exactly where the sample is most saturated, and it changes sign below 2 T. No sample
-#   susceptibility does that, so the non-sample term is not temperature-independent either.
+# THE PERPENDICULAR CHANNEL WORKS: ~1% agreement with DC at 1-3 T, then saturating FASTER, which is
+# the correct direction for 20 mK against a 125x higher temperature -- cooling sharpens a saturation.
+# THE PARALLEL CHANNEL DOES NOT: it stays high where DC says the sample is saturated. Unexplained.
 #
-# So the AC magnitude CANNOT be read as chi'(sample) with what is in this dataset. What is missing is
-# specific and experimental, not analytical: an empty-coil run at matching field and temperature,
-# the coil constants, and an account of what coil B1 held. The DC data are the better characterised
-# side of the contradiction by a wide margin -- absolute units, two instruments, two crystals, and
-# agreement with the published SI to four digits -- so the contradiction is not evidence against them.
+# CAVEATS, because the T1 scale is FITTED. It is fitted on 10-18 T assuming the sample is saturated
+# there, so the high-field end of the perp agreement is partly circular; the 1-8 T comparison is not.
+# T1 is a different sample in a different coil, so it is a template for the drift's SHAPE, not a
+# calibrated background. The fitted scales are large and of opposite sign for the two channels, which
+# is a further reason to treat this as provisional. An empty-coil run at matching field and
+# temperature, plus the coil constants, is what would settle it.
 #
-# WHAT SURVIVES ANYWAY, AND IT IS WORTH HAVING
-#
-# One class of statement is immune to any smooth background, because a smooth background cannot
-# create or cancel a sharp feature: there is NO local dip, step, spike or hysteresis anywhere in
-# 0-18 T, in either sweep direction, in two independent sweep pairs (015/016 and 047/048). A
-# plateau EDGE or a first-order transition would show up as exactly such a feature. That is a
-# weaker negative result than the one intended -- it bounds sharp features, not the overall
-# magnitude of chi' -- but it is a real one, and it does not depend on the calibration that is
-# missing.
+# WHAT NEEDS NO CALIBRATION AT ALL: a smooth background cannot create or cancel a SHARP feature, so
+# the absence of any dip, step, spike or up/down hysteresis anywhere in 0-18 T bounds first-order
+# transitions and plateau edges regardless of all of the above.
 
 using Printf, Statistics, CairoMakie
 
@@ -75,13 +73,14 @@ const FDIR = SV.sv_repo_path(REPO_ROOT, "results/figures/sunny_validation/ac_pla
 const TDIR = SV.sv_repo_path(REPO_ROOT, "results/feature_tables/sunny_validation/ac_plateau_test")
 mkpath(FDIR); mkpath(TDIR)
 
-# Coil -> what is actually in it, from SCM1_July2025.xlsx. Never infer this from column names.
-const COILS = ["T3" => "YbZn2GaO5, B ∥ c  (OURS)",
-               "T1" => "LuCu(OH)Br  (different compound)",
-               "B1" => "unlisted in run log  (reference / instrumental)"]
+# Coil -> what is actually in it, from SCM1_July2025.xlsx columns E/F/G rows 1-2.
+# NEVER infer this from the column names; getting it wrong once already cost a wrong conclusion.
+const COILS = ["B1" => "YbZn2GaO5, B ⟂ c  (OURS, perp)",
+               "T1" => "LuCu(OH)Br  (different compound — instrumental reference)",
+               "T3" => "YbZn2GaO5, B ∥ c  (OURS, para)"]
+const REFCOIL = "T1"          # the non-saturating in-situ template for the instrumental drift
 # 047/048 are NOT a repeat of 015/016. The run log's "4.6 mA" is a heater current, and Tmc confirms
-# it: 015/016 sit at 20 mK, 047/048 at 450-500 mK. That makes them a TEMPERATURE PAIR, which is
-# what rescues the dataset -- see the differencing argument in the header.
+# it: 015/016 sit at 20 mK, 047/048 at 450-500 mK -- so they are a TEMPERATURE pair.
 const SWEEPS = ["015" => "0 → 18 T, 20 mK", "016" => "18 → 0 T, 20 mK",
                 "047" => "0 → 18 T, 450 mK", "048" => "18 → 0 T, 450 mK"]
 const COLD, WARM = "015", "047"
@@ -118,37 +117,66 @@ function bin_sweep(H, V; edges = 0.0:0.1:18.0)
     return c, m, s
 end
 
-"Magnitude and phase of one coil on lock-in 1, binned in field. Magnitude is phase-convention free."
+"""
+Binned COMPLEX response of one coil on lock-in 1. Complex, not magnitude: the coil background and
+the sample response have different phases, so a single quadrature mixes them and even |z| can be
+non-monotonic while the sample response is not.
+"""
 function coil_trace(cols, run, coil)
     H = cols["Field_$(run)"]
     X = cols["$(coil)x1_$(run)"]; Y = cols["$(coil)y1_$(run)"]
     ok = isfinite.(H) .& isfinite.(X) .& isfinite.(Y) .& (H .>= -0.05) .& (H .<= 18.2)
     H, X, Y = H[ok], X[ok], Y[ok]
-    mag = sqrt.(X.^2 .+ Y.^2)
-    ph  = atand.(Y, X)
-    cm, mm, ms = bin_sweep(H, mag)
-    _,  pm, _  = bin_sweep(H, ph)
-    return (; field = cm, mag = mm, mag_sd = ms, phase = pm)
+    f, xr, xs = bin_sweep(H, X)
+    _, yr, ys = bin_sweep(H, Y)
+    z = complex.(xr, yr)
+    return (; field = f, z, mag = abs.(z), phase = rad2deg.(angle.(z)),
+              mag_sd = sqrt.(xs.^2 .+ ys.^2))
 end
 
 data = Dict{Tuple{String,String},Any}()
 for (run, _) in SWEEPS
     cols = read_scm1(run)
     T = cols["Tmc_$(run)"]
-    @printf("run %s (%-18s): %5d rows, Tmc %.4f-%.4f K\n", run,
+    @printf("run %s (%-20s): %5d rows, Tmc %.4f-%.4f K\n", run,
             Dict(SWEEPS)[run], length(cols["Field_$(run)"]), minimum(T), maximum(T))
     for (coil, _) in COILS
         data[(run, coil)] = coil_trace(cols, run, coil)
     end
 end
 
-"Normalise a trace to its own value nearest 1 T, so only shape is compared."
-function norm1T(f, v)
-    k = argmin(abs.(f .- 1.0))
-    return v ./ (abs(v[k]) < eps() ? 1.0 : v[k])
+at(t, B) = argmin(abs.(t.field .- B))
+
+"""
+Sample term for `coil`, using `REFCOIL` as an in-situ template for the instrumental drift:
+
+    s(B) = [z(B) - z(Bmax)] - alpha * [zref(B) - zref(Bmax)]
+
+`alpha` is least squares over `fitrange`, where the sample is assumed saturated so the residual
+should vanish. THAT ASSUMPTION IS THE WEAK POINT, and it makes the high-field end partly circular;
+the low-field comparison does not depend on it. Referencing to `Bmax` alone is NOT enough -- all
+three coils then show a common near-linear ramp to zero, the different compound included, so that
+part is instrumental and has to be removed by the template.
+"""
+function sample_term(coil, run; Bmax = 18.0, fitrange = (10.0, 18.0))
+    t, r = data[(run, coil)], data[(run, REFCOIL)]
+    z0, r0 = t.z[at(t, Bmax)], r.z[at(r, Bmax)]
+    num = den = 0.0
+    for k in eachindex(t.field)
+        (fitrange[1] <= t.field[k] <= fitrange[2]) || continue
+        d = t.z[k] - z0; rr = r.z[at(r, t.field[k])] - r0
+        num += real(d) * real(rr) + imag(d) * imag(rr)
+        den += abs2(rr)
+    end
+    alpha = den > 0 ? num / den : 0.0
+    s = [(t.z[k] - z0) - alpha * (r.z[at(r, t.field[k])] - r0) for k in eachindex(t.field)]
+    return (; field = t.field, amp = abs.(s), alpha)
 end
 
-# DC comparison: dM/dH from the 2.5 K DynaCool data, in absolute units.
+"Normalise to the value nearest 1 T, so only shape is compared."
+norm1T(f, v) = (k = argmin(abs.(f .- 1.0)); v ./ (abs(v[k]) < eps() ? 1.0 : v[k]))
+
+# DC dM/dH in absolute units, for both orientations.
 function dc_derivative(rel, mass_mg)
     lines = readlines(SV.sv_repo_path(REPO_ROOT, rel))
     i = findfirst(l -> strip(l) == "[Data]", lines)
@@ -161,8 +189,7 @@ function dc_derivative(rel, mass_mg)
         h = tryparse(Float64, f[ci["Magnetic Field (Oe)"]])
         m = tryparse(Float64, f[ci["Moment (emu)"]])
         (h === nothing || m === nothing) && continue
-        # Positive branch only, so the centred difference cannot straddle the loop turning points.
-        h/1e4 < 0.05 && continue
+        h/1e4 < 0.05 && continue      # positive branch only, so the difference cannot straddle it
         push!(H, h/1e4); push!(M, m / (5585.0 * mass_mg*1e-3/453.53))
     end
     p = sortperm(H); H, M = H[p], M[p]
@@ -171,162 +198,140 @@ function dc_derivative(rel, mass_mg)
         lo = max(firstindex(M), k-8); hi = min(lastindex(M), k+8)
         d[k] = (M[hi]-M[lo]) / max(1e-9, H[hi]-H[lo])
     end
-    return H, d
+    # The centred difference goes one-sided at the ends, so the last ~1 T is unreliable; trim it.
+    keep = H .<= (maximum(H) - 1.0)
+    return H[keep], d[keep]
 end
-Hdc, Ddc = dc_derivative("data/magnetization/ppms_2p5K/YZGO_BparaC_4.81MG_2.5K_06242026.DAT", 4.81)
-Ddc_n = Ddc ./ Ddc[argmin(abs.(Hdc .- 1.0))]
+Hperp, Dperp = dc_derivative("data/magnetization/ppms_2p5K/YZGO_BperpC_7.7MG_2.5K_06242026.DAT", 7.7)
+Hpara, Dpara = dc_derivative("data/magnetization/ppms_2p5K/YZGO_BparaC_4.81MG_2.5K_06242026.DAT", 4.81)
 
 fig = Figure(size = (1560, 1080))
 Label(fig[0, 1:2],
-      "NHMFL SCM1 AC susceptibility, ~20 mK to 18 T. Only coil T3 holds YbZn2GaO5, and only B ∥ c.";
-      fontsize = 16, font = :bold)
+      "NHMFL SCM1 AC susceptibility, 20 mK to 18 T. Both orientations of YbZn2GaO5 are present; " *
+      "coil T1 holds a different compound and serves as an in-situ instrumental reference.";
+      fontsize = 15, font = :bold)
 
-# --- 1. All three coils, correctly attributed -----------------------------------------
 ax1 = Axis(fig[1, 1], xlabel = "field (T)", ylabel = "|x + iy| at 991 Hz  (V)",
-           title = "All three pickup coils — attribution from the run log, not the column names")
-for ((coil, lbl), col) in zip(COILS, (:crimson, :seagreen, :grey45))
+           title = "All three coils, raw magnitude — attribution from the xlsx key")
+for ((coil, lbl), c) in zip(COILS, (:dodgerblue, :seagreen, :crimson))
     t = data[("015", coil)]
-    lines!(ax1, t.field, t.mag; color = col, linewidth = 2.6, label = "$coil: $lbl")
+    lines!(ax1, t.field, t.mag; color = c, linewidth = 2.6, label = "$coil: $lbl")
 end
 axislegend(ax1; position = :rt, labelsize = 9); xlims!(ax1, 0, 18.2)
 
-# --- 2. Phase: where is the measurement even stable? ----------------------------------
-ax2 = Axis(fig[1, 2], xlabel = "field (T)", ylabel = "phase (deg)",
-           title = "Lock-in phase — T3 is stable to ~4° out to 12 T; B1 rotates 79°")
-for ((coil, _), col) in zip(COILS, (:crimson, :seagreen, :grey45))
+ax2 = Axis(fig[1, 2], xlabel = "Re z  (V)", ylabel = "Im z  (V)",
+           title = "Complex trajectory, 0 → 18 T — the background is a large complex offset")
+for ((coil, _), c) in zip(COILS, (:dodgerblue, :seagreen, :crimson))
     t = data[("015", coil)]
-    lines!(ax2, t.field, t.phase; color = col, linewidth = 2.6, label = coil)
+    lines!(ax2, real.(t.z), imag.(t.z); color = c, linewidth = 2.2, label = coil)
+    scatter!(ax2, [real(t.z[at(t, 0.0)])], [imag(t.z[at(t, 0.0)])]; color = c, markersize = 11)
+    scatter!(ax2, [real(t.z[at(t, 18.0)])], [imag(t.z[at(t, 18.0)])]; color = c,
+             marker = :xcross, markersize = 13)
 end
-vlines!(ax2, [12.0]; color = (:black, 0.45), linestyle = :dash)
-text!(ax2, 12.3, 60; text = "T3 phase begins to\nrotate above ~12 T", fontsize = 10, color = :grey25)
-axislegend(ax2; position = :lt, labelsize = 9); xlims!(ax2, 0, 18.2)
+axislegend(ax2; position = :lt, labelsize = 9)
+text!(ax2, 0.03, 0.04; space = :relative, fontsize = 9.5, color = :grey25,
+      text = "circle = 0 T, cross = 18 T. A single quadrature cuts\n" *
+             "across these paths, which is why x1 alone can go\n" *
+             "negative without that meaning the coil holds no sample.")
 
-# --- 3. The contradiction with our own DC data ----------------------------------------
-ax3 = Axis(fig[2, 1], xlabel = "field (T)", ylabel = "normalised to own value at 1 T",
-           title = "T3 against DC dM/dH — a factor ~8 disagreement at 10 T")
-t = data[("015", "T3")]
-lines!(ax3, t.field, norm1T(t.field, t.mag); color = :crimson, linewidth = 2.8,
-       label = "AC |T3| , 20 mK, B ∥ c")
-lines!(ax3, Hdc, Ddc_n; color = :seagreen, linewidth = 2.6, linestyle = :dash,
-       label = "DC dM/dH, 2.5 K, B ∥ c")
-vlines!(ax3, [10.0]; color = (:black, 0.35), linestyle = :dot)
-hlines!(ax3, [0.0]; color = (:black, 0.35), linestyle = :dash)
-text!(ax3, 4.2, 0.60;
-      text = "Cooling 2.5 K → 20 mK SHARPENS a saturation.\n" *
-             "It cannot flatten one, so temperature does not\n" *
-             "reconcile these. Subtracting the 18 T complex\n" *
-             "value as a coil offset leaves the flat region intact.",
-      fontsize = 10, color = :grey20)
-axislegend(ax3; position = :rt, labelsize = 9); xlims!(ax3, 0, 18.2)
-
-# --- 4. AN ATTEMPTED RESCUE, AND WHY IT FAILS -----------------------------------------
-# The idea: the non-sample contribution should be a property of the coil and the magnet, not of the
-# sample's spin state, hence the same at 20 mK and 450 mK at any given field. Differencing would then
-# cancel it with no coil constant and no empty-coil run needed, leaving the temperature-DEPENDENT
-# part of the sample response -- which MUST collapse to zero once the sample is saturated.
-#
-# IT DOES NOT WORK, and the way it fails is the useful part. The difference is at the noise level
-# from 2 to 7 T but then GROWS monotonically to 7.8e-8 V by 14-18 T, i.e. it is largest exactly
-# where the sample is most completely saturated and a sample response must be smallest. It also
-# changes sign below 2 T. No sample susceptibility behaves that way, so the non-sample term is NOT
-# temperature-independent, and this panel is evidence for that conclusion rather than a measurement
-# of chi'. (Tcoil differs between the runs, and 048 drifts to 0.60 K, so there are candidate
-# mechanisms; none of them can be pinned down without the missing calibration data.)
-cold, warm = data[(COLD, "T3")], data[(WARM, "T3")]
-common = [(k, argmin(abs.(warm.field .- cold.field[k]))) for k in eachindex(cold.field)]
-common = [(k, j) for (k, j) in common if abs(warm.field[j] - cold.field[k]) < 0.06]
-Bd  = [cold.field[k] for (k, _) in common]
-dif = [cold.mag[k] - warm.mag[j] for (k, j) in common]
-sd  = [sqrt(cold.mag_sd[k]^2 + warm.mag_sd[j]^2) for (k, j) in common]
-
-ax4 = Axis(fig[2, 2], xlabel = "field (T)", ylabel = "|T3|(20 mK) − |T3|(450 mK)   (V)",
-           title = "Attempted rescue by differencing temperatures — it FAILS, informatively")
-band!(ax4, Bd, dif .- sd, dif .+ sd; color = (:purple, 0.20))
-lines!(ax4, Bd, dif; color = :purple, linewidth = 2.8, label = "AC temperature difference")
-hlines!(ax4, [0.0]; color = (:black, 0.5), linestyle = :dash)
-noise = median(sd[Bd .>= 8.0])
-hspan!(ax4, -2noise, 2noise; color = (:grey, 0.18))
-ax4b = Axis(fig[2, 2], yaxisposition = :right, ylabel = "DC dM/dH  (μB / T / Yb)",
-            ylabelcolor = :seagreen, yticklabelcolor = :seagreen)
-hidespines!(ax4b); hidexdecorations!(ax4b); linkxaxes!(ax4, ax4b)
-lines!(ax4b, Hdc, Ddc; color = :seagreen, linewidth = 2.4, linestyle = :dash,
-       label = "DC dM/dH, 2.5 K")
-for a in (ax4, ax4b); xlims!(a, 0, 18.2); end
-axislegend(ax4; position = :rt, labelsize = 9)
-text!(ax4, 2.6, maximum(dif)*0.42;
-      text = "If this were the sample, it would track the green DC\n" *
-             "curve and die at saturation. Instead it is at the noise\n" *
-             "level from 2–7 T and LARGEST at 14–18 T, where the\n" *
-             "sample is most saturated. So the non-sample term is not\n" *
-             "temperature-independent, and differencing cannot\n" *
-             "substitute for the missing calibration.\n" *
-             "Grey band = ±2× the scatter above 8 T.",
-      fontsize = 9.5, color = :grey20)
+for (col, (coil, name, Hdc, Ddc)) in enumerate([("B1", "PERPENDICULAR, B ⟂ c", Hperp, Dperp),
+                                                ("T3", "PARALLEL, B ∥ c", Hpara, Dpara)])
+    st = sample_term(coil, COLD)
+    ax = Axis(fig[2, col], xlabel = "field (T)",
+              ylabel = col == 1 ? "normalised to own value at 1 T" : "",
+              title = "$name  ($coil)")
+    lines!(ax, st.field, norm1T(st.field, st.amp); color = :crimson, linewidth = 2.8,
+           label = "AC 20 mK, T1-referenced")
+    lines!(ax, Hdc, Ddc ./ Ddc[argmin(abs.(Hdc .- 1.0))]; color = :seagreen, linewidth = 2.6,
+           linestyle = :dash, label = "DC dM/dH, 2.5 K")
+    hlines!(ax, [0.0]; color = (:black, 0.35), linestyle = :dash)
+    xlims!(ax, 0, 18.2); ylims!(ax, -0.1, 1.35)
+    axislegend(ax; position = :rt, labelsize = 9)
+    verdict = col == 1 ?
+        "AGREES with DC to ~1% at 1–3 T, then saturates\nFASTER — the correct direction for 20 mK\n" *
+        "against 2.5 K, since cooling sharpens a\nsaturation. Usable over 1–8 T." :
+        "STAYS HIGH where DC says the sample is\nsaturated. Unexplained, and not fixed by the\n" *
+        "T1 reference. Do not read chi' off this channel\nuntil an empty-coil run exists."
+    text!(ax, 0.03, 0.28; space = :relative, fontsize = 9.5,
+          color = col == 1 ? :grey20 : :firebrick, text = verdict)
+    text!(ax, 0.03, 0.04; space = :relative, fontsize = 9, color = :grey45,
+          text = "fitted T1 scale alpha = $(round(st.alpha; digits = 2))")
+end
 
 Label(fig[3, 1:2],
-      "WHAT SURVIVES: a smooth instrumental background cannot create or cancel a SHARP feature, so " *
-      "the absence of any dip, step, spike or up/down hysteresis anywhere in 0–18 T bounds " *
-      "first-order transitions and plateau edges even though the magnitude of chi' is uncalibrated. " *
-      "WHAT DOES NOT: chi' itself, because both candidate background models fail (see panel 4). " *
-      "TO FIX IT, three things are needed from the experiment, not from analysis — an empty-coil run " *
-      "at matching field and temperature, the coil constants, and an account of what coil B1 held.";
+      "The T1 scale is FITTED on 10–18 T assuming the sample is saturated there, so the high-field " *
+      "end is partly circular; the 1–8 T comparison is not. T1 is a different sample in a different " *
+      "coil, hence a template for the drift's SHAPE, not a calibrated background. INDEPENDENT OF ALL " *
+      "OF THAT: a smooth background cannot create or cancel a sharp feature, so the absence of any " *
+      "dip, step, spike or up/down hysteresis in 0–18 T bounds first-order transitions and plateau " *
+      "edges. An empty-coil run at matching field and temperature, plus the coil constants, is what " *
+      "would make chi' absolute and settle the parallel channel.";
       fontsize = 10, color = :grey30, word_wrap = true, tellwidth = false)
 
-open(joinpath(TDIR, "ac_coil_magnitudes.csv"), "w") do io
-    println(io, "run,sweep,coil,contents,field_T,magnitude_V,magnitude_sd,phase_deg")
-    for (run, slbl) in SWEEPS, (coil, clbl) in COILS
-        tt = data[(run, coil)]
-        for k in eachindex(tt.field)
-            @printf(io, "%s,%s,%s,%s,%.3f,%.6e,%.6e,%.3f\n", run, slbl, coil,
-                    replace(clbl, "," => ";"), tt.field[k], tt.mag[k], tt.mag_sd[k], tt.phase[k])
+open(joinpath(TDIR, "ac_sample_term.csv"), "w") do io
+    println(io, "coil,contents,run,field_T,raw_mag_V,raw_phase_deg,sample_amp_V,sample_norm_1T")
+    for (coil, clbl) in COILS, (run, _) in SWEEPS
+        t = data[(run, coil)]
+        st = coil == REFCOIL ? nothing : sample_term(coil, run)
+        nn = st === nothing ? nothing : norm1T(st.field, st.amp)
+        for k in eachindex(t.field)
+            @printf(io, "%s,%s,%s,%.3f,%.6e,%.3f,%s,%s\n", coil, replace(clbl, "," => ";"), run,
+                    t.field[k], t.mag[k], t.phase[k],
+                    st === nothing ? "" : @sprintf("%.6e", st.amp[k]),
+                    nn === nothing ? "" : @sprintf("%.6f", nn[k]))
         end
     end
 end
 
-# Quantify "no sharp feature" instead of eyeballing it: compare the largest second difference of
-# the T3 shape against the sweep-to-sweep reproducibility over the same field range.
-println("\nSharp-feature bound on T3 (YbZn2GaO5, B ∥ c):")
-ref = data[("015", "T3")]; rn = norm1T(ref.field, ref.mag)
-d2 = [abs(rn[k-1] - 2rn[k] + rn[k+1]) for k in 2:(length(rn)-1)]
-sel = ref.field[2:end-1] .>= 1.0
-pairs = [("015", "016"), ("047", "048")]
-repro = Float64[]
-for (a, b) in pairs
-    ta, tb = data[(a, "T3")], data[(b, "T3")]
-    na, nb = norm1T(ta.field, ta.mag), norm1T(tb.field, tb.mag)
-    for k in eachindex(ta.field)
-        j = argmin(abs.(tb.field .- ta.field[k]))
-        abs(tb.field[j] - ta.field[k]) < 0.06 && ta.field[k] >= 1.0 && push!(repro, abs(na[k]-nb[j]))
-    end
+println("\nT1-referenced sample term against DC dM/dH, each normalised at 1 T:")
+@printf("  %5s | %14s %14s | %14s %14s\n",
+        "B(T)", "perp AC 20mK", "perp DC 2.5K", "para AC 20mK", "para DC 2.5K")
+sp, spa = sample_term("B1", COLD), sample_term("T3", COLD)
+np_, npa = norm1T(sp.field, sp.amp), norm1T(spa.field, spa.amp)
+dp = Dperp ./ Dperp[argmin(abs.(Hperp .- 1.0))]
+da = Dpara ./ Dpara[argmin(abs.(Hpara .- 1.0))]
+for Bt in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0)
+    kp = argmin(abs.(sp.field .- Bt)); ka = argmin(abs.(spa.field .- Bt))
+    jp = argmin(abs.(Hperp .- Bt));    ja = argmin(abs.(Hpara .- Bt))
+    @printf("  %5.1f | %14.3f %14s | %14.3f %14s\n", Bt, np_[kp],
+            abs(Hperp[jp] - Bt) < 0.4 ? @sprintf("%.3f", dp[jp]) : "-",
+            npa[ka], abs(Hpara[ja] - Bt) < 0.4 ? @sprintf("%.3f", da[ja]) : "-")
 end
-@printf("  largest curvature |d2(chi')| above 1 T   : %.4f per (0.1 T)^2\n", maximum(d2[sel]))
-@printf("  at field                                 : %.2f T\n",
-        ref.field[2:end-1][sel][argmax(d2[sel])])
-@printf("  up/down reproducibility, median          : %.4f   (max %.4f)\n",
-        median(repro), maximum(repro))
-@printf("  monotonic decrease above 2 T?            : %s\n",
-        all(diff(rn[ref.field .>= 2.0]) .<= 0.01) ? "yes, within 0.01" : "no")
-for run in (COLD, WARM)
-    tt = data[(run, "T3")]; nn = norm1T(tt.field, tt.mag)
-    k = argmin(nn[tt.field .>= 2.0])
-    @printf("  run %s: minimum of chi' above 2 T at %.2f T (%s)\n", run,
-            tt.field[tt.field .>= 2.0][k],
-            tt.field[tt.field .>= 2.0][k] > 17.5 ? "the ENDPOINT -- no interior dip" : "INTERIOR DIP")
-end
+@printf("\n  fitted T1 scale: alpha(perp) = %.3f, alpha(para) = %.3f\n", sp.alpha, spa.alpha)
 
-println("\nTemperature-differenced sample response, |T3|(20 mK) - |T3|(450 mK):")
-@printf("  peak                     : %.3e V at %.2f T\n", maximum(dif), Bd[argmax(dif)])
-@printf("  scatter above 8 T (noise): %.3e V\n", noise)
-for B in (1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 14.0, 18.0)
-    k = argmin(abs.(Bd .- B))
-    j = argmin(abs.(Hdc .- B))
-    @printf("  %5.1f T : difference %+.3e V  (%6.1f%% of peak)   DC dM/dH %.4f uB/T (%5.1f%% of its 1 T value)\n",
-            B, dif[k], 100*dif[k]/maximum(dif), Hdc[j] <= maximum(Hdc) ? Ddc[j] : NaN,
-            100*Ddc_n[j])
+# SHARP-FEATURE BOUND. This needs no calibration, but it has to be a test of SHARPNESS, not of where
+# the minimum sits: B1's raw magnitude has a broad shallow minimum near 12 T that is simply the
+# instrumental background turning over, and a "where is the minimum" test reports that as a dip. A
+# plateau edge or a first-order transition is instead a feature LOCALISED in field, so the right
+# statistic is the local curvature measured against the up/down sweep reproducibility -- both are
+# insensitive to any smooth background, however large.
+println("\nSharp-feature bound (calibration-free): local curvature vs up/down reproducibility.")
+println("  A plateau edge or first-order transition is LOCALISED in field, so it must show up as")
+println("  curvature well above the sweep-to-sweep scatter. Units: fraction of the 1 T value.")
+for (coil, _) in COILS
+    coil == REFCOIL && continue
+    up, dn = data[(COLD, coil)], data[("016", coil)]
+    nu = norm1T(up.field, up.mag)
+    nd = norm1T(dn.field, dn.mag)
+    # Reproducibility: |up - down| at matched fields, above 1 T.
+    repro = Float64[]
+    for k in eachindex(up.field)
+        up.field[k] >= 1.0 || continue
+        j = argmin(abs.(dn.field .- up.field[k]))
+        abs(dn.field[j] - up.field[k]) < 0.06 && push!(repro, abs(nu[k] - nd[j]))
+    end
+    # Curvature: second difference over the 0.1 T grid, above 1 T.
+    d2 = [abs(nu[k-1] - 2nu[k] + nu[k+1]) for k in 2:(length(nu)-1)]
+    Bs2 = up.field[2:end-1]
+    sel = Bs2 .>= 1.0
+    kmax = argmax(d2[sel])
+    noise = median(repro)
+    @printf("  %-3s: max curvature %.4f at %5.2f T;  up/down median %.4f, max %.4f;  ratio %.1fx  %s\n",
+            coil, d2[sel][kmax], Bs2[sel][kmax], noise, maximum(repro),
+            d2[sel][kmax] / max(noise, eps()),
+            d2[sel][kmax] < 3 * maximum(repro) ?
+                "-- NO sharp feature above the noise" : "-- CANDIDATE, investigate")
 end
-kfall = findfirst(k -> Bd[k] > Bd[argmax(dif)] && abs(dif[k]) < 2noise, eachindex(Bd))
-@printf("  falls into the noise band above : %s\n",
-        kfall === nothing ? "never within 18 T" : @sprintf("%.2f T", Bd[kfall]))
 
 out = joinpath(FDIR, "ac_susceptibility_plateau_test.png")
 save(out, fig; px_per_unit = 2)
